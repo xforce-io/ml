@@ -1,12 +1,13 @@
 #pragma once
 
 #include "public.h"
+#include "conf.h"
 
 namespace xforce { namespace ml {
 
 class Data {
   public:
-    bool Init();
+    bool Init(const Conf &conf);
 
     size_t GetNumTopics() const { return numTopics_; }
     size_t GetNumDocs() const { return numDocs_; }

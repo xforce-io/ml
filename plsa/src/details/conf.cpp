@@ -15,6 +15,13 @@ bool Conf::Init() {
   )
   numThreads_ = (*conf)["num_threads"].AsInt();
 
+  XFC_FAIL_HANDLE_FATAL(
+      !(*conf)["datapath"].IsStr(),
+      "fail_init_num_threads"
+  )
+  numThreads_ = (*conf)["num_threads"].AsInt();
+  datapath_ = (*conf)["datapath"].AsStr();
+
   XFC_DELETE(conf)
   return true;
 

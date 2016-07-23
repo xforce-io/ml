@@ -17,8 +17,9 @@ int main() {
     }
 
     xforce::ml::Data data;
-    if (!data.Init()) {
+    if (!data.Init(conf)) {
       std::cout << "fail_init_data" << std::endl;
+      return 2;
     }
 
     xforce::ml::Plsa plsa(conf, data);

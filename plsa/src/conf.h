@@ -9,9 +9,11 @@ class Conf {
     bool Init();  
 
     size_t GetNumThreads() const { return numThreads_; }
+    std::string GetDatapath() const { return datapath_; }
 
   private:
     size_t numThreads_;  
+    std::string datapath_;
 };
 
 }}
