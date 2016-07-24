@@ -4,7 +4,8 @@
 
 namespace xforce {
 
-class MultiArrayHelper {
+template <>
+class MultiArray {
   public:
     template <typename T>
     inline static T** CreateDim2(size_t x, size_t y);
@@ -27,22 +28,14 @@ class MultiArrayHelper {
 
 template <typename T>
 T** MultiArrayHelper::CreateDim2(size_t x, size_t y) {
-  T** ret = new T* [x];
-  for (size_t i=0; i<x; ++i) {
-    ret[i] = new T [y];
-  }
+  T **ret = (T**)malloc(x * sizeof(T*));
+  ret[0] = (T*)malloc(x * y * sizeof(T));
   return ret;
 }
 
 template <typename T>
 T*** MultiArrayHelper::CreateDim3(size_t x, size_t y, size_t z) {
-  T*** ret = new T** [x];
-  for (size_t i=0; i<x; ++i) {
-    ret[i] = new T* [y];
-    for (size_t j=0; j<y; ++j) {
-      ret[i][j] = new T [z];
-    }
-  }
+  T ***ret = (T***)malloc(x * sizeof(T**));
   return ret;
 }
 

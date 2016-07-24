@@ -1,23 +1,23 @@
 #include "../data.h"
 
-
 namespace xforce { namespace ml {
 
 bool Data::Init(const Conf &conf) {
     bool ret;
     std::vector<std::string> items;
     size_t sizeBuf = (1<<20);
-    char *buf = new char [sizeBuf];
+    char *buf = RCAST<char*>(malloc(sizeBuf));
 
     std::string tmpStr;
-    std::ifstream fin;
-    fin.open(conf.GetDatapath().c_str(), std::ios::in);
-    XFC_FAIL_HANDLE_FATAL(!fin.good(),
+    FILE *fp = fopen(conf.GetDatapath().c_str(), "r");
+    XFC_FAIL_HANDLE_FATAL(NULL==fp,
         "fail_open_datapath[" << conf.GetDatapath() << "]")
 
-    fin.getline(buf, sizeBuf);
-    XFC_FAIL_HANDLE_FATAL(fin.fail(), 
+    XFC_FAIL_HANDLE_FATAL(NULL == fgets(buf, sizeBuf, fp), 
         "fail_parse_first_line_of_data[" << conf.GetDatapath() << "]")
+    if (buf[strlen(buf)-1] == '\n') {
+        buf[strlen(buf)-1] = '\0';
+    }
 
     StrHelper::SplitStr(buf, ',', items);
     XFC_FAIL_HANDLE_FATAL(items.size() != 3, 
@@ -45,11 +45,15 @@ bool Data::Init(const Conf &conf) {
     memset(accuDocs_, 0, sizeof(accuDocs_[0]) * numDocs_);
 
     for (size_t i=0; i<numDocs_; ++i) {
-        fin.getline(buf, sizeBuf);
-        XFC_FAIL_HANDLE_FATAL(fin.fail(), 
+        std::cout << i << std::endl;
+        XFC_FAIL_HANDLE_FATAL(NULL == fgets(buf, sizeBuf, fp), 
             "fail_parse_line_of_data[" << i << "]")
 
-        StrHelper::SplitStr(tmpStr, '\t', items);
+        if (buf[strlen(buf)-1] == '\n') {
+            buf[strlen(buf)-1] = '\0';
+        }
+
+        StrHelper::SplitStr(buf, '\t', items);
         XFC_FAIL_HANDLE_FATAL(items.size() != numWords_,
             "fail_parse_line_of_data[" << i << "]")
 
@@ -61,7 +65,8 @@ bool Data::Init(const Conf &conf) {
             accuDocs_[i] += accuDocWords_[i][j];
         }
     }
-    delete buf;
+    fclose(fp);
+    free(buf);
     return true;
 
     ERROR_HANDLE:
