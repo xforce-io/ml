@@ -1,6 +1,5 @@
 #include "../data.h"
 
-
 namespace xforce { namespace ml {
 
 bool Data::Init(const Conf &conf) {
@@ -44,7 +43,7 @@ bool Data::Init(const Conf &conf) {
         XFC_FAIL_HANDLE_FATAL(fin.fail(), 
             "fail_parse_line_of_data[" << i << "]")
 
-        StrHelper::SplitStr(tmpStr, '\t', items);
+        StrHelper::SplitStr(tmpStr.c_str(), '\t', items);
         XFC_FAIL_HANDLE_FATAL(items.size() != numWords_,
             "fail_parse_line_of_data[" << i 
                 << "] items_size[" 

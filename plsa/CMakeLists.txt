@@ -10,6 +10,7 @@ include_directories(
 
 link_directories(
   ${CMAKE_SOURCE_DIR}/deps/public-cpp/lib/public-cpp/
+  /usr/local/lib/
 )
 
 FILE(GLOB_RECURSE PLSA_FILES "${CMAKE_SOURCE_DIR}/src/*.cpp")
@@ -22,9 +23,9 @@ add_executable(plsa
 
 target_link_libraries(plsa
   ${LIB_DEPS}
-  log4cplus
   pthread
   rt
+  log4cplus
   z
   public-cpp
 )
