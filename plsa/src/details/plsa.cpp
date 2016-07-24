@@ -29,18 +29,18 @@ Plsa::Plsa(const Conf &conf, const Data &data) :
 void Plsa::Start() {
   tid_ = new pthread_t [conf_->GetNumThreads()];
   for (size_t i=0; i < conf_->GetNumThreads(); ++i) {
-    bool ret = pthread_create(&(tid_[i]), NULL, CalcCallback_, this);
-    if (!ret) {
+    int ret = pthread_create(&(tid_[i]), NULL, CalcCallback_, this);
+    if (0 != ret) {
       FATAL("fail_start_thread");
       return;
     }
   }
 
   size_t round = 0;
-  double err = CalcRound_();
   while (true) {
-    err = CalcRound_();
-    std::cout << "round[" << round << "] err[" << err << "]";
+    std::cout << "start_round[" << round << "]" << std::endl;
+    double err = CalcRound_();
+    std::cout << "round[" << round << "] err[" << err << "]" << std::endl;
     round += 1;
   }
 }
@@ -59,12 +59,9 @@ double Plsa::CalcRound_() {
 }
 
 void Plsa::Ready_() {
-  memcpy(p_Z_Cond_D_W_bak_, p_Z_Cond_D_W_, 
-      sizeof(p_Z_Cond_D_W_[0][0][0]) * NumItems_(0));
-  memcpy(p_W_Cond_Z_bak_, p_W_Cond_Z_, 
-      sizeof(p_W_Cond_Z_[0][0]) * NumItems_(1));
-  memcpy(p_Z_Cond_D_bak_, p_Z_Cond_D_, 
-      sizeof(p_Z_Cond_D_[0][0]) * NumItems_(2));
+  MultiArrayHelper::CopyDim3<double>(numTopics_, numDocs_, numWords_, p_Z_Cond_D_W_, p_Z_Cond_D_W_bak_);  
+  MultiArrayHelper::CopyDim2<double>(numWords_, numTopics_, p_W_Cond_Z_, p_W_Cond_Z_bak_);  
+  MultiArrayHelper::CopyDim2<double>(numTopics_, numDocs_, p_Z_Cond_D_, p_Z_Cond_D_bak_);  
 
   LockNumItems_();
   numEStepItems_=0;
@@ -72,9 +69,9 @@ void Plsa::Ready_() {
   numM2StepItems_=0;
   UnlockNumItems_();
   
-  memset(p_Z_Cond_D_W_calc_, 0, sizeof(p_Z_Cond_D_W_calc_[0]) * NumItems_(0));
-  memset(p_W_Cond_Z_calc_, 0, sizeof(p_W_Cond_Z_calc_[0]) * NumItems_(1));
-  memset(p_Z_Cond_D_calc_, 0, sizeof(p_Z_Cond_D_calc_[0]) * NumItems_(2));
+  MultiArrayHelper::SetDim3<bool>(numTopics_, numDocs_, numWords_, p_Z_Cond_D_W_calc_, false);
+  MultiArrayHelper::SetDim2<bool>(numWords_, numTopics_, p_W_Cond_Z_calc_, false);  
+  MultiArrayHelper::SetDim2<bool>(numTopics_, numDocs_, p_Z_Cond_D_calc_, false);  
 
   step_ = 0;
 }

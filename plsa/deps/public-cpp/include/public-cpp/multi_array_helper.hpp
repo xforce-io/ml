@@ -13,10 +13,10 @@ class MultiArrayHelper {
     inline static T*** CreateDim3(size_t x, size_t y, size_t z);
 
     template <typename T>
-    inline static void CopyDim2(size_t x, size_t y, const T **from, T **to);
+    inline static void CopyDim2(size_t x, size_t y, const T *const *from, T **to);
 
     template <typename T>
-    inline static void CopyDim3(size_t x, size_t y, size_t z, const T ***from, T ***to);
+    inline static void CopyDim3(size_t x, size_t y, size_t z, const T * const* const *from, T ***to);
 
     template <typename T>
     inline static void SetDim2(size_t x, size_t y, T **to, T v);
@@ -47,12 +47,12 @@ T*** MultiArrayHelper::CreateDim3(size_t x, size_t y, size_t z) {
 }
 
 template <typename T>
-void MultiArrayHelper::CopyDim2(size_t x, size_t y, const T **from, T **to) {
+void MultiArrayHelper::CopyDim2(size_t x, size_t y, const T *const *from, T **to) {
   memcpy(to, from, x * y * sizeof(from[0][0]));
 }
 
 template <typename T>
-void MultiArrayHelper::CopyDim3(size_t x, size_t y, size_t z, const T ***from, T ***to) {
+void MultiArrayHelper::CopyDim3(size_t x, size_t y, size_t z, const T *const *const *from, T ***to) {
   memcpy(to, from, x * y * z * sizeof(from[0][0][0]));
 }
 
