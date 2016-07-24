@@ -4,8 +4,7 @@
 
 namespace xforce {
 
-template <>
-class MultiArray {
+class MultiArrayHelper {
   public:
     template <typename T>
     inline static T** CreateDim2(size_t x, size_t y);
@@ -24,29 +23,49 @@ class MultiArray {
 
     template <typename T>
     inline static void SetDim3(size_t x, size_t y, size_t z, T ***to, T v);
+
+    template <typename T>
+    inline static void DeleteDim2(size_t x, size_t y, T **array);
+
+    template <typename T>
+    inline static void DeleteDim3(size_t x, size_t y, size_t z, T ***array);
 };
 
 template <typename T>
 T** MultiArrayHelper::CreateDim2(size_t x, size_t y) {
-  T **ret = (T**)malloc(x * sizeof(T*));
-  ret[0] = (T*)malloc(x * y * sizeof(T));
+  T **ret = RCAST<T**>(malloc(x * sizeof(T*)));
+  for (size_t i=0; i<x; ++i) {
+    ret[i] = RCAST<T*>(malloc(y * sizeof(T)));
+  }
   return ret;
 }
 
 template <typename T>
 T*** MultiArrayHelper::CreateDim3(size_t x, size_t y, size_t z) {
-  T ***ret = (T***)malloc(x * sizeof(T**));
+  T ***ret = RCAST<T**>(malloc(x * sizeof(T**)));
+  for (size_t i=0; i<x; ++i) {
+    ret[i] = RCAST<T*>(malloc(y * sizeof(T*)));
+    for (size_t j=0; j<y; ++j) {
+      ret[i][j] = RCAST<T*>(malloc(z * sizeof(T)));
+    }
+  }
   return ret;
 }
 
 template <typename T>
 void MultiArrayHelper::CopyDim2(size_t x, size_t y, const T **from, T **to) {
-  memcpy(to, from, x * y * sizeof(from[0][0]));
+  for (size_t i=0; i<x; ++i) {
+    memcpy(to[i], from[i], sizeof(T) * y);
+  }
 }
 
 template <typename T>
 void MultiArrayHelper::CopyDim3(size_t x, size_t y, size_t z, const T ***from, T ***to) {
-  memcpy(to, from, x * y * z * sizeof(from[0][0][0]));
+  for (size_t i=0; i<x; ++i) {
+    for (size_t j=0; j<y; ++j) {
+      memcpy(to[i][j], from[i][j], sizeof(T) * z);
+    }
+  }
 }
 
 template <typename T>
@@ -66,6 +85,25 @@ void MultiArrayHelper::SetDim3(size_t x, size_t y, size_t z, T ***to, T v) {
         to[i][j][k] = v;
     }
   }
+}
+
+template <typename T>
+void MultiArrayHelper::DeleteDim2(size_t x, size_t y, T **array) {
+  for (size_t i=0; i<x; ++i) {
+    XFC_DELETE_ARRAY(array[i])
+  }
+  XFC_DELETE_ARRAY(array)
+}
+
+template <typename T>
+void MultiArrayHelper::DeleteDim3(size_t x, size_t y, size_t z, T ***array) {
+  for (size_t i=0; i<x; ++i) {
+    for (size_t j=0; j<y; ++j) {
+      XFC_DELETE_ARRAY(array[i][j])
+    }
+    XFC_DELETE_ARRAY(array[i])
+  }
+  XFC_DELETE_ARRAY(array)
 }
 
 }
