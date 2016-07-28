@@ -9,11 +9,11 @@ Plsa::Plsa(const Conf &conf, const Data &data) :
     numTopics_(data.GetNumTopics()),
     numDocs_(data.GetNumDocs()),
     numWords_(data.GetNumWords()),
+    EDominator_(MultiArrayHelper::CreateDim2<double>(numDocs_, numWords_)),
     p_Z_Cond_D_W_(MultiArrayHelper::CreateDim3<double>(numTopics_, numDocs_, numWords_)),
-    pWZDominator_(new double [numTopics_]),
+    M1Dominator_(new double [numTopics_]),
     p_W_Cond_Z_(MultiArrayHelper::CreateDim2<double>(numWords_, numTopics_)),
     p_Z_Cond_D_(MultiArrayHelper::CreateDim2<double>(numTopics_, numDocs_)), 
-    p_Z_Cond_D_W_bak_(MultiArrayHelper::CreateDim3<double>(numTopics_, numDocs_, numWords_)),
     p_W_Cond_Z_bak_(MultiArrayHelper::CreateDim2<double>(numWords_, numTopics_)),
     p_Z_Cond_D_bak_(MultiArrayHelper::CreateDim2<double>(numTopics_, numDocs_)),
     guards_(new SpinLock [kNumLocks]),
@@ -21,9 +21,9 @@ Plsa::Plsa(const Conf &conf, const Data &data) :
     numEStepItems_(0),
     numM1StepItems_(0),
     numM2StepItems_(0),
-    p_Z_Cond_D_W_calc_(MultiArrayHelper::CreateDim3<bool>(numTopics_, numDocs_, numWords_)),
-    p_W_Cond_Z_calc_(MultiArrayHelper::CreateDim2<bool>(numWords_, numTopics_)),
-    p_Z_Cond_D_calc_(MultiArrayHelper::CreateDim2<bool>(numTopics_, numDocs_)),
+    p_Z_Cond_D_W_calc_(new bool [numTopics_]),
+    p_W_Cond_Z_calc_(new bool [numTopics_]),
+    p_Z_Cond_D_calc_(new bool [numTopics_]),
     tid_(new pthread_t [conf.GetNumThreads()]),
     finishMark_(new bool [conf.GetNumThreads()]),
     end_(false) {}
@@ -110,9 +110,9 @@ void Plsa::Init_() {
     }
     delete [] zdNormalize;
 
-    numEStepItems_ = NumItems_(0);
-    numM1StepItems_ = NumItems_(1);
-    numM2StepItems_ = NumItems_(2);
+    numEStepItems_ = numTopics_;
+    numM1StepItems_ = numTopics_;
+    numM2StepItems_ = numTopics_;
 
     for (size_t i=0; i < conf_->GetNumThreads(); ++i) {
         SetFinishMark_(i);
@@ -135,7 +135,6 @@ double Plsa::CalcRound_() {
 }
 
 void Plsa::Ready_() {
-    MultiArrayHelper::CopyDim3<double>(numTopics_, numDocs_, numWords_, p_Z_Cond_D_W_, p_Z_Cond_D_W_bak_);  
     MultiArrayHelper::CopyDim2<double>(numWords_, numTopics_, p_W_Cond_Z_, p_W_Cond_Z_bak_);  
     MultiArrayHelper::CopyDim2<double>(numTopics_, numDocs_, p_Z_Cond_D_, p_Z_Cond_D_bak_);  
 
@@ -145,10 +144,17 @@ void Plsa::Ready_() {
     numM2StepItems_=0;
     lockNumItems_.Unlock();
 
-    MultiArrayHelper::SetDim3<bool>(numTopics_, numDocs_, numWords_, p_Z_Cond_D_W_calc_, false);
-    MultiArrayHelper::SetDim2<bool>(numWords_, numTopics_, p_W_Cond_Z_calc_, false);  
-    MultiArrayHelper::SetDim2<bool>(numTopics_, numDocs_, p_Z_Cond_D_calc_, false);  
+    for (size_t k=0; k<numTopics_; ++k) {
+        p_Z_Cond_D_W_calc_[k] = false;
+    }
+    for (size_t k=0; k<numTopics_; ++k) {
+        p_W_Cond_Z_calc_[k] = false;
+    }
+    for (size_t k=0; k<numTopics_; ++k) {
+        p_Z_Cond_D_calc_[k] = false;
+    }
 
+    SetEDominator_();
     step_ = 0;
     ClearFinishMark_();
 }
@@ -158,23 +164,22 @@ void Plsa::CalcEM_() {
     while (true) {
         switch (step_) {
             case 0 :
-                if (numEStepItems_ != NumItems_(step_) || !CheckFinishMark_()) {
-                    usleep(10000);
+                if (numEStepItems_ != numTopics_ || !CheckFinishMark_()) {
+                    usleep(10);
                     break;
                 } else {
                     t.Stop();
                     std::cout << "E_cost[" << t.TimeMs() << "]" << std::endl;
                     t.Start();
 
-                    SetpWZDominator_();
-
+                    SetM1Dominator_();
                     step_ = 1;
                     ClearFinishMark_();
                 }
                 break;
             case 1 :
-                if (numM1StepItems_ != NumItems_(step_) || !CheckFinishMark_()) {
-                    usleep(10000);
+                if (numM1StepItems_ != numTopics_ || !CheckFinishMark_()) {
+                    usleep(10);
                     break;
                 } else {
                     t.Stop();
@@ -186,8 +191,8 @@ void Plsa::CalcEM_() {
                 }
                 break;
             default :
-                if (numM2StepItems_ != NumItems_(step_) || !CheckFinishMark_()) {
-                    usleep(10000);
+                if (numM2StepItems_ != numTopics_ || !CheckFinishMark_()) {
+                    usleep(10);
                     break;
                 } else {
                     t.Stop();
@@ -235,7 +240,19 @@ double Plsa::MaxErr_() {
     return maxErr;
 }
 
-void Plsa::SetpWZDominator_() {
+void Plsa::SetEDominator_() {
+    for (size_t i=0; i<numDocs_; ++i) {
+        for (size_t j=0; j<numWords_; ++j) {
+            double dominator = 0.0;
+            for (size_t l=0; l<numTopics_; ++l) {
+                dominator += p_W_Cond_Z_[j][l] * p_Z_Cond_D_[l][i];
+            }
+            EDominator_[i][j] = dominator;
+        }
+    }
+}
+
+void Plsa::SetM1Dominator_() {
     for (size_t k=0; k<numTopics_; ++k) {
         double dominator=0.0;
         for (size_t m=0; m<numDocs_; ++m) {
@@ -243,7 +260,7 @@ void Plsa::SetpWZDominator_() {
                 dominator += data_->GetAccuDocWords(m, n) * p_Z_Cond_D_W_[k][m][n];
             }
         }
-        pWZDominator_[k] = dominator;
+        M1Dominator_[k] = dominator;
     }
 }
 
@@ -262,51 +279,48 @@ bool Plsa::SlaveMove_(size_t id, size_t &lastStep, size_t &lastPos) {
         lastPos=lastPos+1;
     }
 
-    size_t numItems = NumItems_(lastStep);
     switch (lastStep) {
         case 0 :
-            if (numEStepItems_ == numItems) {
+            if (numEStepItems_ == numTopics_) {
                 SetFinishMark_(id);
                 return false;
             }
-            lastPos = lastPos % numItems;
             break;
         case 1 :
-            if (numM1StepItems_ == numItems) {
+            if (numM1StepItems_ == numTopics_) {
                 SetFinishMark_(id);
                 return false;
             }
-            lastPos = lastPos % numItems;
             break;
         default :
-            if (numM2StepItems_ == numItems) {
+            if (numM2StepItems_ == numTopics_) {
                 SetFinishMark_(id);
                 return false;
             }
-            lastPos = lastPos % numItems;
             break;
     }
+    lastPos = lastPos % numTopics_;
     return true;
 }
 
 void Plsa::SlaveCalc_(size_t lastStep, size_t lastPos) {
-    size_t numItems = NumItems_(lastStep);
+    size_t numItems = numTopics_;
     switch (lastStep) {
         case 0 :
             if (numEStepItems_ != numItems) {
-                size_t x = lastPos % numTopics_;
+                size_t x = lastPos;
                 if (LockGuard_(x)) {
-                    if (!p_Z_Cond_D_W_calc_[x][0][0]) {
+                    if (!p_Z_Cond_D_W_calc_[x]) {
                         for (size_t y=0; y<numDocs_; ++y) {
                             for (size_t z=0; z<numWords_; ++z) {
                                 CalcE_(x, y, z);
-                                p_Z_Cond_D_W_calc_[x][y][z] = true;
                             }
                         }
+                        p_Z_Cond_D_W_calc_[x] = true;
 
                         lockNumItems_.LockUntilSucc();
                         if (numEStepItems_ != numItems) {
-                            numEStepItems_ += numDocs_ * numWords_;
+                            ++numEStepItems_;
                         } else {
                             assert(false);
                         }
@@ -319,43 +333,47 @@ void Plsa::SlaveCalc_(size_t lastStep, size_t lastPos) {
             break;
         case 1 :
             if (numM1StepItems_ != numItems) {
-                size_t x = lastPos / numTopics_;
-                size_t y = lastPos % numTopics_;
-                LockGuard_(lastPos);
-                if (!p_W_Cond_Z_calc_[x][y]) {
-                    CalcM1_(x, y);
-                    p_W_Cond_Z_calc_[x][y] = true;
+                size_t y = lastPos;
+                if (LockGuard_(y)) {
+                    if (!p_W_Cond_Z_calc_[y]) {
+                        for (size_t x=0; x<numWords_; ++x) {
+                            CalcM1_(x, y);
+                        }
+                        p_W_Cond_Z_calc_[y] = true;
 
-                    lockNumItems_.LockUntilSucc();
-                    if (numM1StepItems_ != numItems) {
-                        numM1StepItems_ += 1;
-                    } else {
-                        assert(false);
+                        lockNumItems_.LockUntilSucc();
+                        if (numM1StepItems_ != numItems) {
+                            ++numM1StepItems_;
+                        } else {
+                            assert(false);
+                        }
+                        lockNumItems_.Unlock();
                     }
-                    lockNumItems_.Unlock();
+                    UnlockGuard_(y);
                 }
-                UnlockGuard_(lastPos);
                 return;
             }
             break;
         default :
             if (numM2StepItems_ != numItems) {
-                size_t x = lastPos / numDocs_;
-                size_t y = lastPos % numDocs_;
-                LockGuard_(lastPos);
-                if (!p_Z_Cond_D_calc_[x][y]) {
-                    CalcM2_(x, y);
-                    p_Z_Cond_D_calc_[x][y] = true;
+                size_t x = lastPos;
+                if (LockGuard_(x)) {
+                    if (!p_Z_Cond_D_calc_[x]) {
+                        for (size_t y=0; y<numDocs_; ++y) {
+                            CalcM2_(x, y);
+                        }
+                        p_Z_Cond_D_calc_[x] = true;
 
-                    lockNumItems_.LockUntilSucc();
-                    if (numM2StepItems_ != numItems) {
-                        numM2StepItems_ += 1;
-                    } else {
-                        assert(false);
+                        lockNumItems_.LockUntilSucc();
+                        if (numM2StepItems_ != numItems) {
+                            ++numM2StepItems_;
+                        } else {
+                            assert(false);
+                        }
+                        lockNumItems_.Unlock();
                     }
-                    lockNumItems_.Unlock();
+                    UnlockGuard_(x);
                 }
-                UnlockGuard_(lastPos);
                 return;
             }
             break;
@@ -372,7 +390,7 @@ void* Plsa::CalcCallback_(void *args) {
     size_t lastPos = 2;
     while (!self->GetEnd_()) {
         if (!self->SlaveMove_(id, lastStep, lastPos)) {
-            usleep(1000);
+            usleep(10);
             continue;
         }
         self->SlaveCalc_(lastStep, lastPos);

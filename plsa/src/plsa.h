@@ -26,13 +26,13 @@ class Plsa {
     void CalcEM_();
     double MaxErr_();
 
+    void SetEDominator_();
     inline void CalcE_(size_t k, size_t i, size_t j);
-    void SetpWZDominator_();
+    void SetM1Dominator_();
     inline void CalcM1_(size_t j, size_t k);
     inline void CalcM2_(size_t k, size_t i);
     bool SlaveMove_(size_t id, size_t &lastStep, size_t &lastPos);
     void SlaveCalc_(size_t lastStep, size_t lastPos);
-    inline size_t NumItems_(size_t step);
 
     inline bool LockGuard_(size_t idx);
     inline void UnlockGuard_(size_t idx);
@@ -57,12 +57,12 @@ class Plsa {
     size_t numDocs_;
     size_t numWords_;
 
+    double **EDominator_;
     double ***p_Z_Cond_D_W_;
-    double *pWZDominator_;
+    double *M1Dominator_;
     double  **p_W_Cond_Z_;
     double  **p_Z_Cond_D_;
 
-    double ***p_Z_Cond_D_W_bak_;
     double  **p_W_Cond_Z_bak_;
     double  **p_Z_Cond_D_bak_;
 
@@ -75,9 +75,9 @@ class Plsa {
     size_t numM1StepItems_;
     size_t numM2StepItems_;
 
-    bool ***p_Z_Cond_D_W_calc_;
-    bool  **p_W_Cond_Z_calc_;
-    bool  **p_Z_Cond_D_calc_;
+    bool *p_Z_Cond_D_W_calc_;
+    bool *p_W_Cond_Z_calc_;
+    bool *p_Z_Cond_D_calc_;
 
     pthread_t *tid_;
     bool *finishMark_;
@@ -95,12 +95,8 @@ namespace xforce { namespace ml {
 
 void Plsa::CalcE_(size_t k, size_t i, size_t j) {
     double numerator = p_W_Cond_Z_[j][k] * p_Z_Cond_D_[k][i];
-    double dominator = 0.0;
-    for (size_t l=0; l<numTopics_; ++l) {
-        dominator += p_W_Cond_Z_[j][l] * p_Z_Cond_D_[l][i];
-    }
     p_Z_Cond_D_W_[k][i][j] = (numerator > std::numeric_limits<double>::epsilon() &&
-            dominator > std::numeric_limits<double>::epsilon()) ? numerator/dominator : 0;
+            EDominator_[i][j] > std::numeric_limits<double>::epsilon()) ? numerator/EDominator_[i][j] : 0;
 }
 
 void Plsa::CalcM1_(size_t j, size_t k) {
@@ -108,7 +104,7 @@ void Plsa::CalcM1_(size_t j, size_t k) {
     for (size_t m=0; m<numDocs_; ++m) {
         numerator += data_->GetAccuDocWords(m, j) * p_Z_Cond_D_W_[k][m][j];
     }
-    p_W_Cond_Z_[j][k] = numerator/pWZDominator_[k];
+    p_W_Cond_Z_[j][k] = numerator/M1Dominator_[k];
 }
 
 void Plsa::CalcM2_(size_t k, size_t i) {
@@ -116,8 +112,7 @@ void Plsa::CalcM2_(size_t k, size_t i) {
     for (size_t n=0; n<numWords_; ++n) {
         numerator += data_->GetAccuDocWords(i, n) * p_Z_Cond_D_W_[k][i][n];
     }
-    double dominator = data_->GetAccuDocs(i);
-    p_Z_Cond_D_[k][i] = numerator/dominator;
+    p_Z_Cond_D_[k][i] = numerator/data_->GetAccuDocs(i);
 }
 
 bool Plsa::LockGuard_(size_t idx) {
@@ -156,17 +151,6 @@ bool Plsa::CheckFinishMark_() {
     }
     lockFinishMark_.Unlock();
     return ret;
-}
-
-size_t Plsa::NumItems_(size_t step) {
-    switch (step) {
-        case 0 :
-            return numTopics_*numDocs_*numWords_;
-        case 1 :
-            return numWords_*numTopics_;
-        default :
-            return numTopics_*numDocs_;
-    }
 }
 
 }}
