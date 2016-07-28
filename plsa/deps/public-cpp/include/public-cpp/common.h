@@ -12,6 +12,7 @@
 #include <iomanip>
 #include <algorithm>
 #include <assert.h>
+#include <atomic>
 
 #include <limits>
 #include <limits.h>
@@ -299,7 +300,7 @@
   #ifndef XFC_BUG
   #define XFC_BUG(expr) \
     if (unlikely(expr)) { \
-      FATAL("bug_on["__FILE__":" << __LINE__ << "]"); \
+      FATAL("bug_on[" __FILE__ ":" << __LINE__ << "]"); \
     }
   #endif
 

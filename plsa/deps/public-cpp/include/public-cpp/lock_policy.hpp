@@ -7,6 +7,7 @@ namespace xforce {
 class NoLock {
  public:
   bool Lock() const { return true; }
+  void LockUntilSucc() {}
   void Unlock() const {}
 };
 
@@ -16,6 +17,7 @@ class ThreadMutex {
   explicit ThreadMutex() : init_(false) {}
 
   inline bool Lock();
+  inline void LockUntilSucc();
   inline void Unlock();
 
  private:
@@ -31,6 +33,7 @@ class SpinLock {
  public:
   inline SpinLock(); 
   inline bool Lock();
+  inline void LockUntilSucc();
   inline void Unlock();
   inline virtual ~SpinLock();
 
@@ -46,6 +49,11 @@ class SpinLock {
 bool ThreadMutex::Lock() { 
   XFC_RAII_INIT(false)
   return 0 == pthread_mutex_lock(&mutex_); 
+}
+
+void ThreadMutex::LockUntilSucc() {
+    while (!Lock())
+        ;
 }
 
 void ThreadMutex::Unlock() { 
@@ -68,6 +76,11 @@ SpinLock::SpinLock() :
 bool SpinLock::Lock() {
   XFC_RAII_INIT(false)
   return 0 == pthread_spin_lock(&lock_);
+}
+
+void SpinLock::LockUntilSucc() {
+    while (!Lock())
+        ;
 }
 
 void SpinLock::Unlock() {

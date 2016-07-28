@@ -19,8 +19,8 @@ class Time {
 class Timer {
  public:
   inline Timer();
-  inline void Start(bool update);
-  inline void Stop(bool update);
+  inline void Start(bool update=true);
+  inline void Stop(bool update=true);
   time_t TimeUs() const { return stop_-start_; }
   time_t TimeMs() const { return (stop_-start_)/1000; }
   time_t TimeSec() const { return (stop_-start_)/1000000; }
