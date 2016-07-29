@@ -12,14 +12,14 @@ int main() {
 
     xforce::ml::Conf conf;
     if (!conf.Init()) {
-      std::cout << "fail_init_conf" << std::endl;
-      return 1;
+        std::cout << "fail_init_conf" << std::endl;
+        return 1;
     }
 
     xforce::ml::Data data;
     if (!data.Init(conf)) {
-      std::cout << "fail_init_data" << std::endl;
-      return 2;
+        std::cout << "fail_init_data" << std::endl;
+        return 2;
     }
 
     xforce::ml::Plsa plsa(conf, data);
