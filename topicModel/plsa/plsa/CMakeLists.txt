@@ -6,11 +6,13 @@ include_directories(
   /usr/include/
   ${CMAKE_SOURCE_DIR}/deps/public-cpp/include/
   /usr/local/include
+  /home/freeman/software/include/
 )
 
 link_directories(
   ${CMAKE_SOURCE_DIR}/deps/public-cpp/lib/public-cpp/
   /usr/local/lib/
+  /home/freeman/software/lib/
 )
 
 FILE(GLOB_RECURSE PLSA_FILES "${CMAKE_SOURCE_DIR}/src/*.cpp")

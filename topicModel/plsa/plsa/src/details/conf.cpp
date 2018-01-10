@@ -28,6 +28,15 @@ bool Conf::Init() {
     )
     epsilon_ = (*conf)["epsilon"].AsDouble();
 
+    XFC_FAIL_HANDLE_FATAL(
+        !(*conf)["words_per_doc"].IsInt() || 
+        (*conf)["words_per_doc"].AsInt() <= 0,
+        "fail_init_words_per_doc"
+    )
+    wordsPerDoc_ = (*conf)["words_per_doc"].AsInt();
+
+
+
     XFC_DELETE(conf)
     return true;
 

@@ -40,15 +40,19 @@ class CloseHashmap {
  private:
   static const size_t kNumPrimes=28; 
   static const size_t kPrimes[kNumPrimes];
+  static const double kResizeFactor;
 
  public:
   bool Init(
       size_t size_array, 
+      bool to_resize = true,
       KeyEqualF key_equal = KeyEqualF(), 
       HashF hash = HashF());
 
   inline bool Insert(const Key& key, const Val& val);
+  inline bool Upsert(const Key& key, const Val& val);
   inline bool Erase(const Key& key);
+  inline void Copy(const Self &from);
 
   inline const Val* Get(const Key& key) const;
   inline Val* Get(const Key& key);
@@ -61,17 +65,24 @@ class CloseHashmap {
   virtual ~CloseHashmap();
  
  private:
-  inline const Item* GetItem_(const Key& key) const;
-  inline Item* GetItem_(const Key& key);
+  inline const Item* GetItemOrNull_(const Key& key) const;
+  inline Item* GetItemOrNull_(const Key& key);
+  inline const Item* GetItemOrFree_(const Key& key) const;
+  inline Item* GetItemOrFree_(const Key& key);
+  inline void Resize();
 
  private:
   size_t size_array_;
+  bool to_resize_;
   KeyEqualF key_equal_;
   HashF hash_;
 
-  Item* items_;
+  Item *items_;
   size_t num_elm_;
 };
+
+template <typename Key, typename Val, typename KeyEqualF, typename HashF>
+const double CloseHashmap<Key, Val, KeyEqualF, HashF>::kResizeFactor = 1.5;
 
 template <typename Key, typename Val, typename KeyEqualF, typename HashF>
 CloseHashmap<Key, Val, KeyEqualF, HashF>::Iterator::Iterator() :
@@ -145,6 +156,7 @@ const size_t CloseHashmap<Key, Val, KeyEqualF, HashF>::kPrimes[kNumPrimes] = {
 template <typename Key, typename Val, typename KeyEqualF, typename HashF>
 bool CloseHashmap<Key, Val, KeyEqualF, HashF>::Init(
     size_t size_array,
+    bool to_resize,
     KeyEqualF key_equal,
     HashF hash) {
   for (size_t i=0; i<kNumPrimes; ++i) {
@@ -154,25 +166,27 @@ bool CloseHashmap<Key, Val, KeyEqualF, HashF>::Init(
   }
 
   size_array_=size_array;
+  to_resize_=to_resize;
   key_equal_=key_equal;
   hash_=hash;
   num_elm_=0;
-  XFC_NEW(items_, Item [size_array_])
-  for (size_t i=0; i<size_array_; ++i) {
-    items_[i].first = 0;
-  }
+  XFC_MALLOC(items_, Item*, sizeof(Item) * size_array_);
+  bzero(items_, size_array_ * sizeof(Item));
   return true;
 }
 
 template <typename Key, typename Val, typename KeyEqualF, typename HashF>
 bool CloseHashmap<Key, Val, KeyEqualF, HashF>::Insert(const Key& key, const Val& val) {
   if (unlikely(size_array_==num_elm_)) {
-    XFC_BUG(true)
-    return false;
+    if (to_resize_) {
+      Resize();
+    } else {
+      return false;
+    }
   }
 
-  Item* item = GetItem_(key);
-  if (NULL!=item && item->first<=0) {
+  Item* item = GetItemOrFree_(key);
+  if (item->first <= 0) {
     *item = std::make_pair(1, std::make_pair(key, val));
     ++num_elm_;
     return true;
@@ -182,9 +196,34 @@ bool CloseHashmap<Key, Val, KeyEqualF, HashF>::Insert(const Key& key, const Val&
 }
 
 template <typename Key, typename Val, typename KeyEqualF, typename HashF>
+bool CloseHashmap<Key, Val, KeyEqualF, HashF>::Upsert(const Key& key, const Val& val) {
+  Item *item = GetItemOrFree_(key);
+  if (item != NULL && item->first > 0) {
+    *item = std::make_pair(1, std::make_pair(key, val));
+    return true;
+  }
+
+  if (size_array_!=num_elm_) {
+    *item = std::make_pair(1, std::make_pair(key, val));
+    ++num_elm_;
+    return true;
+  } else {
+    if (to_resize_) {
+      Resize();
+      Item* item = GetItemOrFree_(key);
+      *item = std::make_pair(1, std::make_pair(key, val));
+      ++num_elm_;
+      return true;
+    } else {
+      return false;
+    }
+  }  
+}
+
+template <typename Key, typename Val, typename KeyEqualF, typename HashF>
 bool CloseHashmap<Key, Val, KeyEqualF, HashF>::Erase(const Key& key) {
-  Item* item = GetItem_(key);
-  if (NULL!=item && item->first>0 && key_equal_(key, item->second.first)) {
+  Item* item = GetItemOrNull_(key);
+  if (NULL!=item) {
     item->first = -1;
     --num_elm_;
     return true;
@@ -194,9 +233,19 @@ bool CloseHashmap<Key, Val, KeyEqualF, HashF>::Erase(const Key& key) {
 }
 
 template <typename Key, typename Val, typename KeyEqualF, typename HashF>
+void CloseHashmap<Key, Val, KeyEqualF, HashF>::Copy(const Self &other) {
+  if (size_array_ != other.size_array_) {
+    XFC_REALLOC(items_, items_, Item*, other.size_array_ * sizeof(Item));
+    size_array_ = other.size_array_;
+  }
+  num_elm_ = other.num_elm_;
+  memcpy(items_, other.items_, num_elm_ * sizeof(Item));
+}
+
+template <typename Key, typename Val, typename KeyEqualF, typename HashF>
 const Val* CloseHashmap<Key, Val, KeyEqualF, HashF>::Get(const Key& key) const {
-  const Item* item = GetItem_(key);
-  return NULL!=item && item->first > 0 ? &(item->second.second) : NULL;
+  const Item* item = GetItemOrNull_(key);
+  return NULL!=item ? &(item->second.second) : NULL;
 }
 
 template <typename Key, typename Val, typename KeyEqualF, typename HashF>
@@ -206,32 +255,96 @@ Val* CloseHashmap<Key, Val, KeyEqualF, HashF>::Get(const Key& key) {
 
 template <typename Key, typename Val, typename KeyEqualF, typename HashF>
 const typename CloseHashmap<Key, Val, KeyEqualF, HashF>::Item* 
-CloseHashmap<Key, Val, KeyEqualF, HashF>::GetItem_(const Key& key) const {
+CloseHashmap<Key, Val, KeyEqualF, HashF>::GetItemOrNull_(const Key& key) const {
   size_t pos = hash_(key) % size_array_;
-  if (!items_[pos].first || key_equal_(key, items_[pos].second.first)) {
+  if (items_[pos].first > 0 && key_equal_(key, items_[pos].second.first)) {
     return &(items_[pos]);
+  } else if (items_[pos].first == 0) {
+    return NULL;
   }
 
   const size_t step = kPrimes[pos%kNumPrimes]; 
   for (size_t i=0; i<size_array_-1; ++i) {
     pos = (pos+step) % size_array_;
-    if (items_[pos].first==0 || (items_[pos].first>0 && key_equal_(key, items_[pos].second.first))) {
+    if (items_[pos].first > 0 && key_equal_(key, items_[pos].second.first)) {
       return &(items_[pos]);
+    } else if (items_[pos].first == 0) {
+      return NULL;
     }
   }
-  XFC_BUG(true)
+  return NULL;
+}
+
+template <typename Key, typename Val, typename KeyEqualF, typename HashF>
+const typename CloseHashmap<Key, Val, KeyEqualF, HashF>::Item* 
+CloseHashmap<Key, Val, KeyEqualF, HashF>::GetItemOrFree_(const Key& key) const {
+  const Item* item = GetItemOrNull_(key);
+  if (item!=NULL) {
+    return item;
+  }
+
+  size_t pos = hash_(key) % size_array_;
+  const size_t step = kPrimes[pos%kNumPrimes]; 
+  for (size_t i=0; i<size_array_; ++i) {
+    if (items_[pos].first<=0) {
+      return &(items_[pos]);
+    }
+    pos = (pos+step) % size_array_;
+  }
   return NULL;
 }
 
 template <typename Key, typename Val, typename KeyEqualF, typename HashF>
 typename CloseHashmap<Key, Val, KeyEqualF, HashF>::Item* 
-CloseHashmap<Key, Val, KeyEqualF, HashF>::GetItem_(const Key& key) {
-  return CCAST<Item*>(CCAST<const Self*>(this)->GetItem_(key));
+CloseHashmap<Key, Val, KeyEqualF, HashF>::GetItemOrNull_(const Key& key) {
+  return CCAST<Item*>(CCAST<const Self*>(this)->GetItemOrNull_(key));
+}
+
+template <typename Key, typename Val, typename KeyEqualF, typename HashF>
+typename CloseHashmap<Key, Val, KeyEqualF, HashF>::Item* 
+CloseHashmap<Key, Val, KeyEqualF, HashF>::GetItemOrFree_(const Key& key) {
+  return CCAST<Item*>(CCAST<const Self*>(this)->GetItemOrFree_(key));
+}
+
+template <typename Key, typename Val, typename KeyEqualF, typename HashF>
+void CloseHashmap<Key, Val, KeyEqualF, HashF>::Resize() {
+  size_t new_size_array = kResizeFactor * size_array_;  
+  if (new_size_array == size_array_) {
+    ++new_size_array;
+  }
+
+  Item *new_items;
+  XFC_MALLOC(new_items, Item*, sizeof(Item) * new_size_array);
+  bzero(new_items, new_size_array * sizeof(Item));
+
+  for (size_t i=0; i<size_array_; ++i) {
+    if (items_[i].first > 0) {
+      const Key &key = items_[i].second.first;
+      size_t new_pos = hash_(key) % new_size_array;  
+      if (new_items[new_pos].first == 0) {
+        new_items[new_pos] = items_[i];
+        continue;
+      }
+
+      const size_t step = kPrimes[new_pos%kNumPrimes]; 
+      for (size_t j=0; j < new_size_array-1; ++j) {
+        new_pos = (new_pos+step) % new_size_array;
+        if (new_items[new_pos].first == 0) {
+          new_items[new_pos] = items_[i];
+          break;
+        }
+      }
+    }
+  }
+
+  size_array_ = new_size_array;
+  XFC_FREE(items_)
+  items_ = new_items;
 }
 
 template <typename Key, typename Val, typename KeyEqualF, typename HashF>
 CloseHashmap<Key, Val, KeyEqualF, HashF>::~CloseHashmap() {
-  XFC_DELETE_ARRAY(items_)
+  XFC_FREE(items_)
 }
 
 }

@@ -32,8 +32,8 @@ bool Data::Init(const Conf &conf) {
     XFC_FAIL_HANDLE_FATAL(!ret, 
         "fail_parse_first_line_of_data[" << conf.GetDatapath() << "]")
 
-    accuDocWords_ = MultiArrayHelper::CreateDim2<size_t>(numDocs_, numWords_);
-    MultiArrayHelper::SetDim2<size_t>(numDocs_, numWords_, accuDocWords_, 0);
+    accuDocWords_ = MultiArrayHelper::CreateDim2<uint8_t>(numDocs_, numWords_);
+    MultiArrayHelper::SetDim2<uint8_t>(numDocs_, numWords_, accuDocWords_, 0);
 
     XFC_NEW(accuDocs_, size_t [numDocs_])
     memset(accuDocs_, 0, sizeof(accuDocs_[0]) * numDocs_);

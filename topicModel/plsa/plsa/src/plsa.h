@@ -42,6 +42,8 @@ class Plsa {
     inline bool GetFinishMark_(size_t idx);
     inline bool CheckFinishMark_();
 
+    inline double GetPZCondDW_(size_t i, size_t j, size_t k) const;
+
     bool GetEnd_() const { return end_; }
 
     void Dump_();
@@ -58,7 +60,6 @@ class Plsa {
     size_t numWords_;
 
     double **EDominator_;
-    double ***p_Z_Cond_D_W_;
     double *M1Dominator_;
     double  **p_W_Cond_Z_;
     double  **p_Z_Cond_D_;
@@ -94,15 +95,15 @@ class Plsa {
 namespace xforce { namespace ml {
 
 void Plsa::CalcE_(size_t k, size_t i, size_t j) {
-    double numerator = p_W_Cond_Z_[j][k] * p_Z_Cond_D_[k][i];
-    p_Z_Cond_D_W_[k][i][j] = (numerator > std::numeric_limits<double>::epsilon() &&
-            EDominator_[i][j] > std::numeric_limits<double>::epsilon()) ? numerator/EDominator_[i][j] : 0;
+    //double numerator = p_W_Cond_Z_[j][k] * p_Z_Cond_D_[k][i];
+    //p_Z_Cond_D_W_[k][i][j] = (numerator > std::numeric_limits<double>::epsilon() &&
+            //EDominator_[i][j] > std::numeric_limits<double>::epsilon()) ? numerator/EDominator_[i][j] : 0;
 }
 
 void Plsa::CalcM1_(size_t j, size_t k) {
     double numerator = 0.0;
     for (size_t m=0; m<numDocs_; ++m) {
-        numerator += data_->GetAccuDocWords(m, j) * p_Z_Cond_D_W_[k][m][j];
+        numerator += data_->GetAccuDocWords(m, j) * GetPZCondDW_(k, m, j);
     }
     p_W_Cond_Z_[j][k] = numerator/M1Dominator_[k];
 }
@@ -110,7 +111,7 @@ void Plsa::CalcM1_(size_t j, size_t k) {
 void Plsa::CalcM2_(size_t k, size_t i) {
     double numerator = 0.0;
     for (size_t n=0; n<numWords_; ++n) {
-        numerator += data_->GetAccuDocWords(i, n) * p_Z_Cond_D_W_[k][i][n];
+        numerator += data_->GetAccuDocWords(i, n) * GetPZCondDW_(k, i, n);
     }
     p_Z_Cond_D_[k][i] = numerator/data_->GetAccuDocs(i);
 }
@@ -151,6 +152,12 @@ bool Plsa::CheckFinishMark_() {
     }
     lockFinishMark_.Unlock();
     return ret;
+}
+
+double Plsa::GetPZCondDW_(size_t k, size_t i, size_t j) const {
+    double numerator = p_W_Cond_Z_bak_[j][k] * p_Z_Cond_D_bak_[k][i];
+    return (numerator > std::numeric_limits<double>::epsilon() &&
+            EDominator_[i][j] > std::numeric_limits<double>::epsilon()) ? numerator/EDominator_[i][j] : 0;
 }
 
 }}

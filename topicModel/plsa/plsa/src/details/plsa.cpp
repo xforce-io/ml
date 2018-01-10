@@ -10,7 +10,6 @@ Plsa::Plsa(const Conf &conf, const Data &data) :
     numDocs_(data.GetNumDocs()),
     numWords_(data.GetNumWords()),
     EDominator_(MultiArrayHelper::CreateDim2<double>(numDocs_, numWords_)),
-    p_Z_Cond_D_W_(MultiArrayHelper::CreateDim3<double>(numTopics_, numDocs_, numWords_)),
     M1Dominator_(new double [numTopics_]),
     p_W_Cond_Z_(MultiArrayHelper::CreateDim2<double>(numWords_, numTopics_)),
     p_Z_Cond_D_(MultiArrayHelper::CreateDim2<double>(numTopics_, numDocs_)), 
@@ -66,15 +65,6 @@ void Plsa::Stop() {
 
 void Plsa::Init_() {
     static unsigned int randSeed = 0;
-
-    //init p_Z_Cond_D_W_
-    for (size_t i=0; i<numDocs_; ++i) {
-        for (size_t j=0; j<numWords_; ++j) {
-            for (size_t k=0; k<numTopics_; ++k) {
-                p_Z_Cond_D_W_[k][i][j] = 1.0/numTopics_;
-            }
-        }
-    }
  
     //init p_W_Cond_Z_
     double *wzNormalize = new double [numTopics_];
@@ -257,7 +247,7 @@ void Plsa::SetM1Dominator_() {
         double dominator=0.0;
         for (size_t m=0; m<numDocs_; ++m) {
             for (size_t n=0; n<numWords_; ++n) {
-                dominator += data_->GetAccuDocWords(m, n) * p_Z_Cond_D_W_[k][m][n];
+                dominator += data_->GetAccuDocWords(m, n) * GetPZCondDW_(k, m, n);
             }
         }
         M1Dominator_[k] = dominator;
@@ -402,7 +392,7 @@ void Plsa::Dump_() {
     for (size_t k=0; k<numTopics_; ++k) {
         for (size_t j=0; j<numWords_; ++j) {
             if (p_W_Cond_Z_[j][k] > std::numeric_limits<double>::epsilon()) {
-                printf("jk[%lu,%lu] => %.9f\n", j, k, p_W_Cond_Z_[j][k]);
+                printf("jk=%lu=%lu=%.9f\n", j, k, p_W_Cond_Z_[j][k]);
             }
         }
     }
@@ -410,7 +400,7 @@ void Plsa::Dump_() {
     for (size_t k=0; k<numTopics_; ++k) {
         for (size_t i=0; i<numDocs_; ++i) {
             if (p_Z_Cond_D_[k][i] > std::numeric_limits<double>::epsilon()) {
-                printf("ki[%lu,%lu] => %.9f\n", k, i, p_Z_Cond_D_[k][i]);
+                printf("ki=%lu=%lu=%.9f\n", k, i, p_Z_Cond_D_[k][i]);
             }
         }
     }
