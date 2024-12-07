@@ -462,50 +462,63 @@ class MCTSPolicy(Policy):
         return child
     
     def _simulate(self, board: Board) -> float:
-        """改进的模拟策略，增加搜索深度"""
+        """改进的模拟策略"""
         original_player = board.current_player
         depth = 0
         
-        while depth < self.max_depth:  # 使用最大深度限制
+        while depth < self.max_depth:
             valid_moves = board.get_valid_moves()
             if not valid_moves:
                 return 0.0
             
-            # 用启发式选择动作，而不是完全随机
-            if depth < self.max_depth // 2:  # 在前半段使用启发式
+            # 根据深度使用不同的策略
+            if depth < self.max_depth // 3:  # 前期使用启发式
                 action = self._get_heuristic_action(board, valid_moves)
-            else:  # 在后半段使用随机策略
+            elif depth < self.max_depth * 2 // 3:  # 中期混合策略
+                if random.random() < 0.7:
+                    action = self._get_heuristic_action(board, valid_moves)
+                else:
+                    action = random.choice(valid_moves)
+            else:  # 后期随机
                 action = random.choice(valid_moves)
                 
-            game_over, _ = board.make_move(action)
+            game_over, reward = board.make_move(action)
             depth += 1
             
             if game_over:
                 return 1.0 if board.current_player == original_player else -1.0
         
-        # 如果达到最大深度仍未结束，使用启发式评估
+        # 达到最大深度时的评估
         return self._evaluate_position(board, original_player)
     
     def _get_heuristic_action(self, board: Board, valid_moves: List[Action]) -> Action:
-        """使用简单的启发式来选择动作"""
+        """改进的启发式动作选择"""
+        move_scores = []
         center = board.size // 2
         
-        # 计算每个动作到中心的距
-        move_scores = []
         for move in valid_moves:
+            # 计算多个特征
             distance_to_center = abs(move.x - center) + abs(move.y - center)
             connectivity_score = self._evaluate_connectivity(board, move)
-            score = connectivity_score - 0.1 * distance_to_center  # 权衡连接性和中心位置
-            move_scores.append((score, move))  # 确保score在前，这样排序时会比较score而不是Action
+            bridge_score = self._evaluate_bridge_potential(board, move)
+            blocking_score = self._evaluate_blocking_value(board, move)
+            
+            # 综合评分
+            score = (0.3 * connectivity_score +
+                    0.3 * bridge_score +
+                    0.3 * blocking_score -
+                    0.1 * (distance_to_center / board.size))
+            
+            move_scores.append((score, move))
         
-        # 按照分数排序（现在会较元组的第一个元素，即score）
+        # 选择最佳动作
         move_scores.sort(key=lambda x: x[0], reverse=True)
-        top_moves = move_scores[:3]  # 选择前3个最佳动作
-        return random.choice([m[1] for m in top_moves])
+        top_k = max(3, len(move_scores) // 4)  # 动态调整选择范围
+        return random.choice([m[1] for m in move_scores[:top_k]])
     
     def _evaluate_connectivity(self, board: Board, move: Action) -> float:
         """评估一个动作的连接价值"""
-        # 检查周围8个��向的己方棋子数量
+        # 检查周围8个方向的己方棋子数量
         directions = [(0,1), (1,0), (-1,0), (0,-1), (1,-1), (-1,1)]
         connected_pieces = 0
         
@@ -518,26 +531,69 @@ class MCTSPolicy(Policy):
         return connected_pieces / len(directions)
     
     def _evaluate_position(self, board: Board, original_player: int) -> float:
-        """位置评估函数"""
-        # 实现一个简单的位置评估
-        # 可以考虑：
-        # 1. 己方棋子的连接度
-        # 2. 到达目标边的最短路径
-        # 3. 控制中心区域的程度
-        
-        # 这里实现一个简单版本
+        """改进的位置评估函数"""
+        # 计算基础分数
         player_pieces = np.sum(board.board == original_player)
         opponent_pieces = np.sum(board.board == (3 - original_player))
         
-        # 计算连度
+        # 计算连接度
         player_connectivity = self._calculate_board_connectivity(board, original_player)
         opponent_connectivity = self._calculate_board_connectivity(board, 3 - original_player)
         
-        # 归一化评分到 [-1, 1] 范围
-        score = 0.4 * (player_pieces - opponent_pieces) / (board.size * board.size)
-        score += 0.6 * (player_connectivity - opponent_connectivity)
+        # 计算到目标边的距离
+        player_distance = self._calculate_distance_to_goal(board, original_player)
+        opponent_distance = self._calculate_distance_to_goal(board, 3 - original_player)
+        
+        # 计算中心控制
+        player_center_control = self._calculate_center_control(board, original_player)
+        opponent_center_control = self._calculate_center_control(board, 3 - original_player)
+        
+        # 综合评分 (权重可以通过实验调整)
+        score = (0.3 * (player_pieces - opponent_pieces) / (board.size * board.size) +
+                0.3 * (player_connectivity - opponent_connectivity) +
+                0.2 * (opponent_distance - player_distance) +
+                0.2 * (player_center_control - opponent_center_control))
         
         return max(min(score, 1.0), -1.0)
+    
+    def _calculate_distance_to_goal(self, board: Board, player: int) -> float:
+        """计算到目标边的最短距离"""
+        min_distance = float('inf')
+        size = board.size
+        
+        if player == 1:  # 横向连接
+            # 检查每个己方棋子到右边界的距离
+            for x in range(size):
+                for y in range(size):
+                    if board.board[x, y] == player:
+                        distance = size - 1 - y
+                        min_distance = min(min_distance, distance)
+        else:  # 纵向连接
+            # 检查每个己方棋子到下边界的距离
+            for x in range(size):
+                for y in range(size):
+                    if board.board[x, y] == player:
+                        distance = size - 1 - x
+                        min_distance = min(min_distance, distance)
+        
+        return min_distance if min_distance != float('inf') else size
+    
+    def _calculate_center_control(self, board: Board, player: int) -> float:
+        """计算中心区域控制度"""
+        size = board.size
+        center = size // 2
+        center_score = 0.0
+        total_weights = 0.0
+        
+        for x in range(size):
+            for y in range(size):
+                if board.board[x, y] == player:
+                    # 距离中心越近权重越大
+                    weight = 1.0 / (1.0 + abs(x - center) + abs(y - center))
+                    center_score += weight
+                    total_weights += weight
+        
+        return center_score / total_weights if total_weights > 0 else 0.0
     
     def _calculate_board_connectivity(self, board: Board, player: int) -> float:
         """计算整个棋盘上某个玩家的连接度"""
@@ -700,11 +756,35 @@ def plot_comparison(results: Dict[str, List[Tuple[float, float]]], total_rounds:
     plt.show()
 
 def main():
-    # 配实验参数
+    # 配置实验参数
     board_size = 5
-    total_rounds = 2000           # 增加训练轮数
-    statistics_rounds = 200       # 增加统计间隔
+    total_rounds = 5000  # 增加训练轮数
+    statistics_rounds = 500
     
+    # MCTS配置
+    mcts_configs = {
+        'MCTS-Advanced': {
+            'strategy': 'robust',
+            'simulations': 3000,  # 增加模拟次数
+            'max_depth': 150,     # 增加搜索深度
+            'c': 1.414,
+            'use_rave': False      # 启用RAVE
+        }
+    }
+    
+    # DynaQ配置
+    config = LearningConfig(
+        algorithm_type='DynaQ',
+        initial_learning_rate=0.3,
+        final_learning_rate=0.01,
+        initial_epsilon=0.4,
+        final_epsilon=0.05,
+        gamma=0.99,
+        planning_steps=300,
+        batch_size=128,
+        memory_size=100000
+    )
+
     # 创建实验环境
     experiment = GameExperiment(board_size)
     runner = ExperimentRunner(total_rounds, statistics_rounds)
@@ -722,22 +802,6 @@ def main():
     # 添加MCTS
     print("\nRunning experiment with MCTS")
     agent1 = Agent(RandomPolicy(), None, player_id=1, name="Random")
-    mcts_configs = {
-        'MCTS-Pure': {
-            'strategy': 'robust', 
-            'simulations': 500,
-            'max_depth': 50,
-            'c': 1.414,
-            'use_rave': False
-        },
-        'MCTS-Pure-Deeper': {
-            'strategy': 'robust',
-            'simulations': 2000,
-            'max_depth': 100,
-            'c': 1.414,
-            'use_rave': False 
-        }
-    }
     for name, config in mcts_configs.items():
         agent2 = MCTSAgent(
             simulations_per_move=config['simulations'],
@@ -778,7 +842,7 @@ def main():
     plot_comparison(results, total_rounds, statistics_rounds)
 
 class Evaluator:
-    """模型估器"""
+    """模估器"""
     def __init__(self):
         self.metrics = defaultdict(list)
     
