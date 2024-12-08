@@ -149,7 +149,7 @@ class Board:
 
 @dataclass
 class LearningConfig:
-    """学习参数统一配置"""
+    """学习参数��一配置"""
     algorithm_type: str
     initial_learning_rate: float = 0.2    # 更高的初始学习率
     final_learning_rate: float = 0.01     # 最终学习率
@@ -400,33 +400,33 @@ class MCTSPolicy(Policy):
         self.player_id = player_id
         self.max_depth = max_depth
         self.num_workers = num_workers
-        self.thread_pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=self.num_workers,
-            thread_name_prefix="mcts_worker"
+        self.process_pool = concurrent.futures.ProcessPoolExecutor(
+            max_workers=num_workers
         )
     
     def get_action(self, board: Board, state: State) -> Action:
         root = MCTSNode(state, use_rave=self.use_rave)
         root.untried_actions = board.get_valid_moves()
         
-        # 将模拟任务分成多个批次
+        # 将模拟任务分成多个批次，并使用进程池而不是线程池
         batch_size = self.simulations_per_move // self.num_workers
-        futures = []
         
-        for _ in range(self.num_workers):
-            futures.append(
-                self.thread_pool.submit(
-                    self._batch_simulation, 
-                    root, 
-                    board.copy(), 
-                    batch_size
+        # 使用 ProcessPoolExecutor 替代 ThreadPoolExecutor
+        with concurrent.futures.ProcessPoolExecutor(max_workers=self.num_workers) as process_pool:
+            futures = []
+            for _ in range(self.num_workers):
+                futures.append(
+                    process_pool.submit(
+                        self._batch_simulation, 
+                        root, 
+                        board.copy(), 
+                        batch_size
+                    )
                 )
-            )
+            
+            # 等待所有批次完成
+            concurrent.futures.wait(futures)
         
-        # 等待所有批次完成
-        concurrent.futures.wait(futures)
-        
-        # 根据策略选择最终动作
         return self._select_final_action(root)
     
     def _batch_simulation(self, root: MCTSNode, board: Board, num_simulations: int):
@@ -634,7 +634,7 @@ class MCTSPolicy(Policy):
         for x in range(size):
             for y in range(size):
                 if board.board[x, y] == player:
-                    # 距离中心越近权��越大
+                    # 距离中心越近权重越大
                     weight = 1.0 / (1.0 + abs(x - center) + abs(y - center))
                     center_score += weight
                     total_weights += weight
@@ -791,9 +791,8 @@ class ExperimentRunner:
         self.statistics_rounds = statistics_rounds
         self.logger = logging.getLogger(__name__)
         self.num_workers = num_workers
-        self.thread_pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=num_workers,
-            thread_name_prefix="experiment_worker"
+        self.process_pool = concurrent.futures.ProcessPoolExecutor(
+            max_workers=num_workers
         )
     
     def run_experiment(self, experiment: GameExperiment) -> List[Tuple[float, float]]:
@@ -810,7 +809,7 @@ class ExperimentRunner:
             # 并行运行每个批次
             for worker_id in range(self.num_workers):
                 batch_futures.append(
-                    self.thread_pool.submit(
+                    self.process_pool.submit(
                         self._run_batch,
                         experiment,
                         batch_size
@@ -824,7 +823,7 @@ class ExperimentRunner:
                 batch_wins[0] += worker_wins[0]
                 batch_wins[1] += worker_wins[1]
             
-            # 计算率
+            # 计算胜率
             win_rate1 = batch_wins[0] / self.statistics_rounds
             win_rate2 = batch_wins[1] / self.statistics_rounds
             win_rates_history.append((win_rate1, win_rate2))
@@ -851,7 +850,7 @@ class ExperimentRunner:
         return local_wins
 
 def plot_comparison(results: Dict[str, List[Tuple[float, float]]], total_rounds: int, statistics_rounds: int):
-    """绘制不同策略的比较图"""
+    """绘制不同��略的比较图"""
     plt.figure(figsize=(12, 6))
     
     # 计算x轴的合数
