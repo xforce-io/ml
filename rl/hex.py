@@ -10,6 +10,9 @@ import math
 import concurrent.futures
 import threading
 import time
+import os
+import sys
+import multiprocessing
 
 logging.basicConfig(
     level=logging.INFO,
@@ -149,7 +152,7 @@ class Board:
 
 @dataclass
 class LearningConfig:
-    """学习参数��一配置"""
+    """学习参数一配置"""
     algorithm_type: str
     initial_learning_rate: float = 0.2    # 更高的初始学习率
     final_learning_rate: float = 0.01     # 最终学习率
@@ -325,33 +328,25 @@ class MCTSNode:
         if use_rave:
             self.rave_visits = 0
             self.rave_value = 0.0
-            
-        # 添加线程锁
-        self._lock = threading.RLock()
-        self.children_lock = threading.Lock()
     
     def update(self, reward: float):
-        """单锁操作，安全"""
-        with self._lock:
-            self.visits += 1
-            self.value += reward
+        """更新节点统计"""
+        self.visits += 1
+        self.value += reward
     
     def update_rave(self, reward: float):
-        """单锁操作，安全"""
+        """更新RAVE统计"""
         if self.use_rave:
-            with self._lock:
-                self.rave_visits += 1
-                self.rave_value += reward
+            self.rave_visits += 1
+            self.rave_value += reward
     
     def add_child(self, action: Action, child: 'MCTSNode'):
-        """单锁操作，安全"""
-        with self.children_lock:
-            self.children[action] = child
+        """添加子节点"""
+        self.children[action] = child
     
     def remove_untried_action(self, action: Action):
-        """单锁操作，安全"""
-        with self._lock:
-            self.untried_actions.remove(action)
+        """移除未尝试的动作"""
+        self.untried_actions.remove(action)
     
     def is_terminal(self) -> bool:
         """判断是否为终端节点"""
@@ -379,19 +374,18 @@ class MCTSNode:
     
     def get_children(self) -> Dict[Action, MCTSNode]:
         """安全地获取children"""
-        with self.children_lock:
-            return dict(self.children)  # 返回副本
+        return dict(self.children)  # 返回副本
 
 class MCTSPolicy(Policy):
     """基于MCTS的策略"""
-    def __init__(self, simulations_per_move: int = 5000,
+    def __init__(self, simulations_per_move: int = 3000,
                  c: float = 1.414,
                  rave_constant: float = 300,
                  use_rave: bool = False,
                  selection_strategy: str = 'robust',
                  player_id: int = 1,
                  max_depth: int = 50,
-                 num_workers: int = 32):
+                 base_rollouts_per_leaf: int = 20):  # 基础rollout次数
         self.simulations_per_move = simulations_per_move
         self.c = c
         self.rave_constant = rave_constant
@@ -399,40 +393,71 @@ class MCTSPolicy(Policy):
         self.selection_strategy = selection_strategy
         self.player_id = player_id
         self.max_depth = max_depth
-        self.num_workers = num_workers
-        self.process_pool = concurrent.futures.ProcessPoolExecutor(
-            max_workers=num_workers
-        )
+        self.base_rollouts_per_leaf = base_rollouts_per_leaf
+    
+    def _get_dynamic_rollouts(self, board: Board) -> int:
+        """根据剩余空格动态调整rollout次数"""
+        empty_spaces = len(board.get_valid_moves())
+        total_spaces = board.size * board.size
+        
+        # 根据剩余空格比例调整rollout次数
+        # 游戏后期（空格少）时增加rollout次数
+        ratio = 1.0 - (empty_spaces / total_spaces)  # 比例从0到1
+        additional_rollouts = int(10 * ratio)  # 最多额外增加10次
+        
+        return self.base_rollouts_per_leaf + additional_rollouts
+    
+    def _simulate(self, board: Board) -> float:
+        """改进的模拟策略，动态调整rollout次数"""
+        rewards = []
+        original_board = board.copy()
+        rollouts = self._get_dynamic_rollouts(original_board)
+        
+        # 对同一个叶子节点进行多次rollout
+        for _ in range(rollouts):
+            board = original_board.copy()
+            original_player = board.current_player
+            depth = 0
+            
+            while depth < self.max_depth:
+                valid_moves = board.get_valid_moves()
+                if not valid_moves:
+                    rewards.append(0.0)
+                    break
+                
+                # 动态调整策略
+                if depth < self.max_depth // 4:  # 开局阶段
+                    action = self._get_early_game_action(board, valid_moves)
+                elif depth < self.max_depth * 3 // 4:  # 中局阶段
+                    if random.random() < 0.8:
+                        action = self._get_heuristic_action(board, valid_moves)
+                    else:
+                        action = random.choice(valid_moves)
+                else:  # 残局阶段
+                    action = self._get_endgame_action(board, valid_moves)
+                
+                game_over, reward = board.make_move(action)
+                depth += 1
+                
+                if game_over:
+                    rewards.append(1.0 if board.current_player == original_player else -1.0)
+                    break
+            
+            if depth >= self.max_depth:
+                rewards.append(self._evaluate_position(board, original_player))
+        
+        # 返回所有rollout的平均奖励
+        return sum(rewards) / len(rewards)
     
     def get_action(self, board: Board, state: State) -> Action:
         root = MCTSNode(state, use_rave=self.use_rave)
         root.untried_actions = board.get_valid_moves()
         
-        # 将模拟任务分成多个批次，并使用进程池而不是线程池
-        batch_size = self.simulations_per_move // self.num_workers
-        
-        # 使用 ProcessPoolExecutor 替代 ThreadPoolExecutor
-        with concurrent.futures.ProcessPoolExecutor(max_workers=self.num_workers) as process_pool:
-            futures = []
-            for _ in range(self.num_workers):
-                futures.append(
-                    process_pool.submit(
-                        self._batch_simulation, 
-                        root, 
-                        board.copy(), 
-                        batch_size
-                    )
-                )
-            
-            # 等待所有批次完成
-            concurrent.futures.wait(futures)
+        # 串行执行模拟
+        for _ in range(self.simulations_per_move):
+            self._run_simulation(root, board.copy())
         
         return self._select_final_action(root)
-    
-    def _batch_simulation(self, root: MCTSNode, board: Board, num_simulations: int):
-        """执行一批模拟"""
-        for _ in range(num_simulations):
-            self._run_simulation(root, board.copy())
     
     def _run_simulation(self, root: MCTSNode, board: Board) -> None:
         """运行单次模拟"""
@@ -469,35 +494,6 @@ class MCTSPolicy(Policy):
         child.untried_actions = board.get_valid_moves()
         node.children[action] = child
         return child
-    
-    def _simulate(self, board: Board) -> float:
-        """改进的模拟策略"""
-        original_player = board.current_player
-        depth = 0
-        
-        while depth < self.max_depth:
-            valid_moves = board.get_valid_moves()
-            if not valid_moves:
-                return 0.0
-            
-            # 动态调整策略
-            if depth < self.max_depth // 4:  # 开局阶段
-                action = self._get_early_game_action(board, valid_moves)
-            elif depth < self.max_depth * 3 // 4:  # 中局阶段
-                if random.random() < 0.8:  # 增加启发式比例
-                    action = self._get_heuristic_action(board, valid_moves)
-                else:
-                    action = random.choice(valid_moves)
-            else:  # 残局阶段
-                action = self._get_endgame_action(board, valid_moves)
-            
-            game_over, reward = board.make_move(action)
-            depth += 1
-            
-            if game_over:
-                return 1.0 if board.current_player == original_player else -1.0
-        
-        return self._evaluate_position(board, original_player)
     
     def _get_early_game_action(self, board: Board, valid_moves: List[Action]) -> Action:
         """开局策略"""
@@ -729,6 +725,65 @@ class MCTSPolicy(Policy):
             return max(root.children.items(),
                       key=lambda x: x[1].value / (x[1].visits + 1e-10))[0]
 
+    def _evaluate_bridge_potential(self, board: Board, move: Action) -> float:
+        """评估形成桥接的潜力"""
+        directions = [(0,1), (1,0), (-1,0), (0,-1), (1,-1), (-1,1)]
+        bridge_score = 0.0
+        player = board.current_player
+        
+        # 检查每对相对方向
+        for i in range(len(directions)//2):
+            dir1, dir2 = directions[i], directions[i+len(directions)//2]
+            x1, y1 = move.x + dir1[0], move.y + dir1[1]
+            x2, y2 = move.x + dir2[0], move.y + dir2[1]
+            
+            # 检查两个方向是否都在棋盘内
+            if (0 <= x1 < board.size and 0 <= y1 < board.size and
+                0 <= x2 < board.size and 0 <= y2 < board.size):
+                # 如果两个方向都是己方棋子，增加桥接分数
+                if (board.board[x1, y1] == player and 
+                    board.board[x2, y2] == player):
+                    bridge_score += 1.0
+                # 如果一个方向是己方棋子，另一个方向是空位
+                elif ((board.board[x1, y1] == player and board.board[x2, y2] == 0) or
+                      (board.board[x1, y1] == 0 and board.board[x2, y2] == player)):
+                    bridge_score += 0.5
+                
+        return bridge_score / len(directions)
+
+    def _evaluate_blocking_value(self, board: Board, move: Action) -> float:
+        """评估一个动作的阻挡价值"""
+        opponent = 3 - board.current_player
+        blocking_score = 0.0
+        
+        # 临时模拟这步棋
+        temp_board = board.copy()
+        temp_board.board[move.x, move.y] = board.current_player
+        
+        # 检查这步棋是否阻断了对手的连接
+        directions = [(0,1), (1,0), (-1,0), (0,-1), (1,-1), (-1,1)]
+        for dx1, dy1 in directions:
+            x1, y1 = move.x + dx1, move.y + dy1
+            if not (0 <= x1 < board.size and 0 <= y1 < board.size):
+                continue
+                
+            # 检查是否有对手的棋子
+            if board.board[x1, y1] == opponent:
+                # 检查这个对手棋子的连接情况
+                connected_count = 0
+                for dx2, dy2 in directions:
+                    x2, y2 = x1 + dx2, y1 + dy2
+                    if (0 <= x2 < board.size and 
+                        0 <= y2 < board.size and 
+                        board.board[x2, y2] == opponent):
+                        connected_count += 1
+                
+                # 如果这步棋切断了对手的连接，增加阻挡分数
+                if connected_count > 0:
+                    blocking_score += connected_count / len(directions)
+        
+        return blocking_score / len(directions)
+
 class Agent:
     """智能体"""
     def __init__(self, policy: Policy, estimator: Optional[ValueEstimator], 
@@ -766,7 +821,7 @@ class GameExperiment:
         self.agent2 = agent2
     
     def play_game(self) -> Tuple[Agent, int]:
-        """进行一局游戏，返获胜者和步数"""
+        """进行一局游戏，返获胜步数"""
         self.board.reset()
         current_agent = random.choice([self.agent1, self.agent2])
         moves_count = 0
@@ -786,46 +841,78 @@ class GameExperiment:
 
 class ExperimentRunner:
     """实验运行器"""
-    def __init__(self, total_rounds: int, statistics_rounds: int, num_workers: int = 16):
+    def __init__(self, total_rounds: int, statistics_rounds: int, num_cores: Optional[int] = None):
         self.total_rounds = total_rounds
         self.statistics_rounds = statistics_rounds
+        self.num_cores = num_cores or (os.cpu_count() or 4)
         self.logger = logging.getLogger(__name__)
-        self.num_workers = num_workers
-        self.process_pool = concurrent.futures.ProcessPoolExecutor(
-            max_workers=num_workers
-        )
     
+    def _run_game_batch(self, experiment: GameExperiment, num_games: int) -> Tuple[int, int]:
+        """运行一批游戏并返回胜利统计"""
+        # 创建新的实验实例
+        new_experiment = GameExperiment(experiment.board.size)
+        
+        # 复制 agent1 (Random Policy)
+        agent1 = Agent(RandomPolicy(), None, player_id=1, name="Random")
+        
+        # 复制 agent2 (MCTS)
+        agent2 = MCTSAgent(
+            simulations_per_move=3000,
+            max_depth=100,
+            c=1.732,
+            use_rave=False,
+            selection_strategy='robust',
+            base_rollouts_per_leaf=20,
+            player_id=2,
+            name="MCTS-Advanced"
+        )
+        
+        # 设置agents
+        new_experiment.set_agents(agent1, agent2)
+        
+        wins1 = 0
+        wins2 = 0
+        
+        for _ in range(num_games):
+            winner, _ = new_experiment.play_game()
+            if winner == new_experiment.agent1:
+                wins1 += 1
+            elif winner == new_experiment.agent2:
+                wins2 += 1
+                
+        return wins1, wins2
+        
     def run_experiment(self, experiment: GameExperiment) -> List[Tuple[float, float]]:
         """并行运行实验"""
-        wins = [0, 0]
         win_rates_history = []
         
-        # 将游戏回合分成多个批次
-        batch_size = self.statistics_rounds // self.num_workers
-        
         for round_start in range(0, self.total_rounds, self.statistics_rounds):
-            batch_futures = []
+            total_wins = [0, 0]
             
-            # 并行运行每个批次
-            for worker_id in range(self.num_workers):
-                batch_futures.append(
-                    self.process_pool.submit(
-                        self._run_batch,
-                        experiment,
-                        batch_size
-                    )
-                )
+            # 计算每个进程需要运行的游戏数
+            games_per_process = self.statistics_rounds // self.num_cores
+            remaining_games = self.statistics_rounds % self.num_cores
             
-            # 收集批次结果
-            batch_wins = [0, 0]
-            for future in concurrent.futures.as_completed(batch_futures):
-                worker_wins = future.result()
-                batch_wins[0] += worker_wins[0]
-                batch_wins[1] += worker_wins[1]
+            # 创进程池
+            with concurrent.futures.ProcessPoolExecutor(max_workers=self.num_cores) as executor:
+                # 提交任务
+                future_to_batch = {
+                    executor.submit(
+                        self._run_game_batch,
+                        GameExperiment(experiment.board.size),  # 为每个进程创建新的游戏实例
+                        games_per_process + (1 if i < remaining_games else 0)
+                    ): i for i in range(self.num_cores)
+                }
+                
+                # 收集结果
+                for future in concurrent.futures.as_completed(future_to_batch):
+                    wins1, wins2 = future.result()
+                    total_wins[0] += wins1
+                    total_wins[1] += wins2
             
             # 计算胜率
-            win_rate1 = batch_wins[0] / self.statistics_rounds
-            win_rate2 = batch_wins[1] / self.statistics_rounds
+            win_rate1 = total_wins[0] / self.statistics_rounds
+            win_rate2 = total_wins[1] / self.statistics_rounds
             win_rates_history.append((win_rate1, win_rate2))
             
             self.logger.info(f"Round {round_start + self.statistics_rounds}: "
@@ -833,24 +920,9 @@ class ExperimentRunner:
                            f"{experiment.agent2.name} win rate = {win_rate2:.2f}")
         
         return win_rates_history
-    
-    def _run_batch(self, experiment: GameExperiment, batch_size: int) -> Tuple[int, int]:
-        """运行一个批次的游戏"""
-        local_wins = [0, 0]
-        local_experiment = GameExperiment(experiment.board.size)
-        local_experiment.set_agents(experiment.agent1, experiment.agent2)
-        
-        for _ in range(batch_size):
-            winner, _ = local_experiment.play_game()
-            if winner == local_experiment.agent1:
-                local_wins[0] += 1
-            elif winner == local_experiment.agent2:
-                local_wins[1] += 1
-                
-        return local_wins
 
 def plot_comparison(results: Dict[str, List[Tuple[float, float]]], total_rounds: int, statistics_rounds: int):
-    """绘制不同��略的比较图"""
+    """绘制不同略的比较图"""
     plt.figure(figsize=(12, 6))
     
     # 计算x轴的合数
@@ -873,17 +945,19 @@ def plot_comparison(results: Dict[str, List[Tuple[float, float]]], total_rounds:
 def main():
     # 配置实验参数
     board_size = 5
-    total_rounds = 10000  # 增加到10000轮
-    statistics_rounds = 1000  # 增加统计间隔
+    total_rounds = 10000
+    statistics_rounds = 1000
+    num_cores = 8  # 在这里配置使用的CPU核心数
     
     # MCTS配置
     mcts_configs = {
         'MCTS-Advanced': {
             'strategy': 'robust',
-            'simulations': 3000,      # 增加到5000次
-            'max_depth': 100,         # 调整深度到100
-            'c': 1.732,              # 增加探索参数
-            'use_rave': False         # 启用RAVE以提高效率
+            'simulations': 3000,      # 总迭代次数保持3000
+            'max_depth': 100,
+            'c': 1.732,
+            'use_rave': False,
+            'base_rollouts_per_leaf': 20  # 基础rollout次数设为20
         }
     }
     
@@ -902,9 +976,9 @@ def main():
 
     # 创建实验环境
     experiment = GameExperiment(board_size)
-    runner = ExperimentRunner(total_rounds, statistics_rounds)
+    runner = ExperimentRunner(total_rounds, statistics_rounds, num_cores)
     
-    # 创建算法配置
+    # 创算法配置
     base_config = {
         'epsilon': 0.1,
         'learning_rate': 0.1,
@@ -919,25 +993,24 @@ def main():
     
     # 添加MCTS
     print("\nRunning experiment with MCTS")
-    agent1 = Agent(RandomPolicy(), None, player_id=1, name="Random")
-    for name, config in mcts_configs.items():
-        agent2 = MCTSAgent(
-            simulations_per_move=config['simulations'],
-            max_depth=config['max_depth'],
-            c=config['c'],
-            use_rave=config['use_rave'],
-            selection_strategy=config['strategy'],
-            player_id=2,
-            name=name
-        )
-        experiment.set_agents(agent1, agent2)
-        results[name] = runner.run_experiment(experiment)
-        
-        experiment_end = time.time()
-        print(f"Experiment {name} completed in {experiment_end - experiment_start:.2f} seconds")
+    experiment = GameExperiment(board_size)  # 确保创建了新的实验实例
     
-    end_time = time.time()
-    print(f"\nTotal execution time: {end_time - start_time:.2f} seconds")
+    # 设置初始agents
+    agent1 = Agent(RandomPolicy(), None, player_id=1, name="Random")
+    agent2 = MCTSAgent(
+        simulations_per_move=3000,
+        max_depth=100,
+        c=1.732,
+        use_rave=False,
+        selection_strategy='robust',
+        base_rollouts_per_leaf=20,
+        player_id=2,
+        name="MCTS-Advanced"
+    )
+    experiment.set_agents(agent1, agent2)
+    
+    # 运行实验
+    results["MCTS-Advanced"] = runner.run_experiment(experiment)
     
     # 添加DynaQ
     print("\nRunning experiment with DynaQ")
@@ -981,7 +1054,7 @@ class Evaluator:
         return metrics
 
 class TrainingVisualizer:
-    """训练过程化"""
+    """训��过程化"""
     def __init__(self):
         self.metrics_history = defaultdict(list)
     
@@ -1055,7 +1128,8 @@ class MCTSAgent(Agent):
                  max_depth: int = 50,
                  c: float = 1.414, 
                  selection_strategy: str = 'robust',
-                 use_rave: bool = False,  # 添加 use_rave 参数
+                 use_rave: bool = False,
+                 base_rollouts_per_leaf: int = 20,
                  player_id: int = 1, 
                  name: str = "MCTS"):
         policy = MCTSPolicy(
@@ -1063,7 +1137,8 @@ class MCTSAgent(Agent):
             max_depth=max_depth,
             c=c,
             selection_strategy=selection_strategy,
-            use_rave=use_rave,  # 传递 use_rave 参数给 MCTSPolicy
+            use_rave=use_rave,
+            base_rollouts_per_leaf=base_rollouts_per_leaf,
             player_id=player_id
         )
         super().__init__(policy, None, player_id, name)
@@ -1093,4 +1168,8 @@ class RLAlgorithm:
         return GreedyPolicy(self.estimator, self.config.epsilon)
 
 if __name__ == "__main__":
+    # 设置进启动方法（在 main 函数开始处添加）
+    if sys.platform == 'darwin':  # macOS
+        multiprocessing.set_start_method('spawn')
+    
     main() 
