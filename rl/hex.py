@@ -280,7 +280,7 @@ class GreedyPolicy(Policy):
         valid_moves = board.get_valid_moves()
         q_values = [self.estimator.get_q_value(state, action) for action in valid_moves]
         
-        # 选择Q值大
+        # 选择Q值
         max_q = max(q_values)
         max_indices = [i for i, q in enumerate(q_values) if q == max_q]
         chosen_idx = random.choice(max_indices)
@@ -356,7 +356,7 @@ class MCTSNode:
         return len(self.untried_actions) == 0 and len(self.children) == 0
     
     def is_fully_expanded(self) -> bool:
-        """判断是否完全展开"""
+        """判断是否完展开"""
         return len(self.untried_actions) == 0
     
     def get_value(self, c: float = 1.414, rave_constant: float = 300) -> float:
@@ -471,25 +471,57 @@ class MCTSPolicy(Policy):
             if not valid_moves:
                 return 0.0
             
-            # 根据深度使用不同的策略
-            if depth < self.max_depth // 3:  # 前期使用启发式
-                action = self._get_heuristic_action(board, valid_moves)
-            elif depth < self.max_depth * 2 // 3:  # 中期混合策略
-                if random.random() < 0.7:
+            # 动态调整策略
+            if depth < self.max_depth // 4:  # 开局阶段
+                action = self._get_early_game_action(board, valid_moves)
+            elif depth < self.max_depth * 3 // 4:  # 中局阶段
+                if random.random() < 0.8:  # 增加启发式比例
                     action = self._get_heuristic_action(board, valid_moves)
                 else:
                     action = random.choice(valid_moves)
-            else:  # 后期随机
-                action = random.choice(valid_moves)
-                
+            else:  # 残局阶段
+                action = self._get_endgame_action(board, valid_moves)
+            
             game_over, reward = board.make_move(action)
             depth += 1
             
             if game_over:
                 return 1.0 if board.current_player == original_player else -1.0
         
-        # 达到最大深度时的评估
         return self._evaluate_position(board, original_player)
+    
+    def _get_early_game_action(self, board: Board, valid_moves: List[Action]) -> Action:
+        """开局策略"""
+        # 优先选择中心区域
+        center = board.size // 2
+        center_moves = []
+        for move in valid_moves:
+            if abs(move.x - center) <= 1 and abs(move.y - center) <= 1:
+                center_moves.append(move)
+        
+        if center_moves:
+            return random.choice(center_moves)
+        return self._get_heuristic_action(board, valid_moves)
+    
+    def _get_endgame_action(self, board: Board, valid_moves: List[Action]) -> Action:
+        """残局策略"""
+        best_score = float('-inf')
+        best_moves = []
+        
+        for move in valid_moves:
+            temp_board = board.copy()
+            temp_board.make_move(move)
+            
+            # 评估这步棋后的局面
+            score = self._evaluate_position(temp_board, board.current_player)
+            
+            if score > best_score:
+                best_score = score
+                best_moves = [move]
+            elif score == best_score:
+                best_moves.append(move)
+        
+        return random.choice(best_moves)
     
     def _get_heuristic_action(self, board: Board, valid_moves: List[Action]) -> Action:
         """改进的启发式动作选择"""
@@ -548,11 +580,16 @@ class MCTSPolicy(Policy):
         player_center_control = self._calculate_center_control(board, original_player)
         opponent_center_control = self._calculate_center_control(board, 3 - original_player)
         
-        # 综合评分 (权重可以通过实验调整)
-        score = (0.3 * (player_pieces - opponent_pieces) / (board.size * board.size) +
-                0.3 * (player_connectivity - opponent_connectivity) +
-                0.2 * (opponent_distance - player_distance) +
-                0.2 * (player_center_control - opponent_center_control))
+        # 计算潜在胜利路径
+        player_paths = self._calculate_potential_winning_paths(board, original_player)
+        opponent_paths = self._calculate_potential_winning_paths(board, 3 - original_player)
+        
+        # 调整权重分配
+        score = (0.15 * (player_pieces - opponent_pieces) / (board.size * board.size) +
+                0.25 * (player_connectivity - opponent_connectivity) +
+                0.25 * (opponent_distance - player_distance) +
+                0.15 * (player_center_control - opponent_center_control) +
+                0.20 * (player_paths - opponent_paths))
         
         return max(min(score, 1.0), -1.0)
     
@@ -641,6 +678,37 @@ class MCTSPolicy(Policy):
             
             reward = -reward
 
+    def _calculate_potential_winning_paths(self, board: Board, player: int) -> float:
+        """计算潜在获胜路径数"""
+        size = board.size
+        paths = 0
+        
+        if player == 1:  # 横向连接
+            for x in range(size):
+                empty_count = 0
+                player_count = 0
+                for y in range(size):
+                    if board.board[x, y] == 0:
+                        empty_count += 1
+                    elif board.board[x, y] == player:
+                        player_count += 1
+                # 如果这条路径上没有对手的棋子
+                if player_count + empty_count == size:
+                    paths += (1.0 + 0.5 * player_count)  # 已有棋子越多，分数越高
+        else:  # 纵向连接
+            for y in range(size):
+                empty_count = 0
+                player_count = 0
+                for x in range(size):
+                    if board.board[x, y] == 0:
+                        empty_count += 1
+                    elif board.board[x, y] == player:
+                        player_count += 1
+                if player_count + empty_count == size:
+                    paths += (1.0 + 0.5 * player_count)
+        
+        return paths / size  # 归一化
+
 class Agent:
     """智能体"""
     def __init__(self, policy: Policy, estimator: Optional[ValueEstimator], 
@@ -665,7 +733,7 @@ class Agent:
         self.current_episode = Episode(self.player_id)
     
 class GameExperiment:
-    """游戏实验"""
+    """游戏实"""
     def __init__(self, board_size: int = 5):
         self.board = Board(board_size)
         self.agent1 = None
@@ -758,17 +826,17 @@ def plot_comparison(results: Dict[str, List[Tuple[float, float]]], total_rounds:
 def main():
     # 配置实验参数
     board_size = 5
-    total_rounds = 5000  # 增加训练轮数
-    statistics_rounds = 500
+    total_rounds = 10000  # 增加到10000轮
+    statistics_rounds = 1000  # 增加统计间隔
     
     # MCTS配置
     mcts_configs = {
         'MCTS-Advanced': {
             'strategy': 'robust',
-            'simulations': 3000,  # 增加模拟次数
-            'max_depth': 150,     # 增加搜索深度
-            'c': 1.414,
-            'use_rave': False      # 启用RAVE
+            'simulations': 3000,      # 增加到5000次
+            'max_depth': 100,         # 调整深度到100
+            'c': 1.732,              # 增加探索参数
+            'use_rave': False         # 启用RAVE以提高效率
         }
     }
     
