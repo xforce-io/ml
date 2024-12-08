@@ -141,8 +141,9 @@ class Board:
     
     def copy(self) -> 'Board':
         """创建棋盘的深拷贝"""
-        new_board = Board(self.size)
-        new_board.board = self.board.copy()
+        new_board = Board.__new__(Board)  # 避免调用 __init__
+        new_board.size = self.size
+        new_board.board = self.board.copy()  # numpy的copy是高效的
         new_board.current_player = self.current_player
         return new_board
 
@@ -633,7 +634,7 @@ class MCTSPolicy(Policy):
         for x in range(size):
             for y in range(size):
                 if board.board[x, y] == player:
-                    # 距离中心越近权重越大
+                    # 距离中心越近权��越大
                     weight = 1.0 / (1.0 + abs(x - center) + abs(y - center))
                     center_score += weight
                     total_weights += weight
