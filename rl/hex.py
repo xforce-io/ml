@@ -9,6 +9,7 @@ import logging
 import math
 import concurrent.futures
 import threading
+import time
 
 logging.basicConfig(
     level=logging.INFO,
@@ -149,7 +150,7 @@ class Board:
 class LearningConfig:
     """学习参数统一配置"""
     algorithm_type: str
-    initial_learning_rate: float = 0.2    # 更高的初始学���率
+    initial_learning_rate: float = 0.2    # 更高的初始学习率
     final_learning_rate: float = 0.01     # 最终学习率
     initial_epsilon: float = 0.3          # 更高的初始探索率
     final_epsilon: float = 0.05           # 最终探索率
@@ -356,7 +357,7 @@ class MCTSNode:
         return len(self.untried_actions) == 0 and len(self.children) == 0
     
     def is_fully_expanded(self) -> bool:
-        """判断是否完展开"""
+        """判断是否完展"""
         return len(self.untried_actions) == 0
     
     def get_value(self, c: float = 1.414, rave_constant: float = 300) -> float:
@@ -389,7 +390,7 @@ class MCTSPolicy(Policy):
                  selection_strategy: str = 'robust',
                  player_id: int = 1,
                  max_depth: int = 50,
-                 num_workers: int = 8):
+                 num_workers: int = 32):
         self.simulations_per_move = simulations_per_move
         self.c = c
         self.rave_constant = rave_constant
@@ -398,32 +399,39 @@ class MCTSPolicy(Policy):
         self.player_id = player_id
         self.max_depth = max_depth
         self.num_workers = num_workers
+        self.thread_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=self.num_workers,
+            thread_name_prefix="mcts_worker"
+        )
     
     def get_action(self, board: Board, state: State) -> Action:
         root = MCTSNode(state, use_rave=self.use_rave)
         root.untried_actions = board.get_valid_moves()
         
-        # 创建线程池
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            # 提交模拟任务
-            futures = []
-            for _ in range(self.simulations_per_move):
-                futures.append(executor.submit(self._run_simulation, root, board.copy()))
-            
-            # 等待所有模拟完成
-            concurrent.futures.wait(futures)
+        # 将模拟任务分成多个批次
+        batch_size = self.simulations_per_move // self.num_workers
+        futures = []
+        
+        for _ in range(self.num_workers):
+            futures.append(
+                self.thread_pool.submit(
+                    self._batch_simulation, 
+                    root, 
+                    board.copy(), 
+                    batch_size
+                )
+            )
+        
+        # 等待所有批次完成
+        concurrent.futures.wait(futures)
         
         # 根据策略选择最终动作
-        if self.selection_strategy == 'robust':
-            return max(root.children.items(), 
-                      key=lambda x: x[1].visits)[0]
-        elif self.selection_strategy == 'optimistic':
-            return max(root.children.items(), 
-                      key=lambda x: x[1].value / x[1].visits)[0]
-        else:  # combined
-            return max(root.children.items(),
-                      key=lambda x: (x[1].value / x[1].visits) * 
-                                  math.sqrt(x[1].visits))[0]
+        return self._select_final_action(root)
+    
+    def _batch_simulation(self, root: MCTSNode, board: Board, num_simulations: int):
+        """执行一批模拟"""
+        for _ in range(num_simulations):
+            self._run_simulation(root, board.copy())
     
     def _run_simulation(self, root: MCTSNode, board: Board) -> None:
         """运行单次模拟"""
@@ -492,7 +500,7 @@ class MCTSPolicy(Policy):
     
     def _get_early_game_action(self, board: Board, valid_moves: List[Action]) -> Action:
         """开局策略"""
-        # 优先选择中心区域
+        # 先选择中心区域
         center = board.size // 2
         center_moves = []
         for move in valid_moves:
@@ -709,6 +717,17 @@ class MCTSPolicy(Policy):
         
         return paths / size  # 归一化
 
+    def _select_final_action(self, root: MCTSNode) -> Action:
+        """根据模拟结果选择最终动作"""
+        if self.selection_strategy == 'robust':
+            # 选择访问次数最多的动作
+            return max(root.children.items(),
+                      key=lambda x: x[1].visits)[0]
+        else:
+            # 选择平均奖励最高的动作
+            return max(root.children.items(),
+                      key=lambda x: x[1].value / (x[1].visits + 1e-10))[0]
+
 class Agent:
     """智能体"""
     def __init__(self, policy: Policy, estimator: Optional[ValueEstimator], 
@@ -733,7 +752,7 @@ class Agent:
         self.current_episode = Episode(self.player_id)
     
 class GameExperiment:
-    """游戏实"""
+    """戏实"""
     def __init__(self, board_size: int = 5):
         self.board = Board(board_size)
         self.agent1 = None
@@ -766,41 +785,69 @@ class GameExperiment:
 
 class ExperimentRunner:
     """实验运行器"""
-    def __init__(self, total_rounds: int, statistics_rounds: int):
+    def __init__(self, total_rounds: int, statistics_rounds: int, num_workers: int = 16):
         self.total_rounds = total_rounds
         self.statistics_rounds = statistics_rounds
         self.logger = logging.getLogger(__name__)
+        self.num_workers = num_workers
+        self.thread_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=num_workers,
+            thread_name_prefix="experiment_worker"
+        )
     
     def run_experiment(self, experiment: GameExperiment) -> List[Tuple[float, float]]:
-        """运行一次实验，返回胜率历史"""
-        wins = [0, 0]  # [agent1 wins, agent2 wins]
+        """并行运行实验"""
+        wins = [0, 0]
         win_rates_history = []
         
-        for round_num in range(self.total_rounds):
-            winner, moves = experiment.play_game()
+        # 将游戏回合分成多个批次
+        batch_size = self.statistics_rounds // self.num_workers
+        
+        for round_start in range(0, self.total_rounds, self.statistics_rounds):
+            batch_futures = []
             
-            if winner == experiment.agent1:
-                experiment.agent1.reward(1, experiment.board)
-                experiment.agent2.reward(-1, experiment.board)
-                wins[0] += 1
-            elif winner == experiment.agent2:
-                experiment.agent1.reward(-1, experiment.board)
-                experiment.agent2.reward(1, experiment.board)
-                wins[1] += 1
-            else:  # 平局
-                experiment.agent1.reward(-0.5, experiment.board)
-                experiment.agent2.reward(-0.5, experiment.board)
+            # 并行运行每个批次
+            for worker_id in range(self.num_workers):
+                batch_futures.append(
+                    self.thread_pool.submit(
+                        self._run_batch,
+                        experiment,
+                        batch_size
+                    )
+                )
             
-            if (round_num + 1) % self.statistics_rounds == 0:
-                win_rate1 = wins[0] / self.statistics_rounds
-                win_rate2 = wins[1] / self.statistics_rounds
-                win_rates_history.append((win_rate1, win_rate2))
-                self.logger.info(f"Round {round_num + 1}: "
-                               f"{experiment.agent1.name} win rate = {win_rate1:.2f}, "
-                               f"{experiment.agent2.name} win rate = {win_rate2:.2f}")
-                wins = [0, 0]  # 重置胜利
+            # 收集批次结果
+            batch_wins = [0, 0]
+            for future in concurrent.futures.as_completed(batch_futures):
+                worker_wins = future.result()
+                batch_wins[0] += worker_wins[0]
+                batch_wins[1] += worker_wins[1]
+            
+            # 计算率
+            win_rate1 = batch_wins[0] / self.statistics_rounds
+            win_rate2 = batch_wins[1] / self.statistics_rounds
+            win_rates_history.append((win_rate1, win_rate2))
+            
+            self.logger.info(f"Round {round_start + self.statistics_rounds}: "
+                           f"{experiment.agent1.name} win rate = {win_rate1:.2f}, "
+                           f"{experiment.agent2.name} win rate = {win_rate2:.2f}")
         
         return win_rates_history
+    
+    def _run_batch(self, experiment: GameExperiment, batch_size: int) -> Tuple[int, int]:
+        """运行一个批次的游戏"""
+        local_wins = [0, 0]
+        local_experiment = GameExperiment(experiment.board.size)
+        local_experiment.set_agents(experiment.agent1, experiment.agent2)
+        
+        for _ in range(batch_size):
+            winner, _ = local_experiment.play_game()
+            if winner == local_experiment.agent1:
+                local_wins[0] += 1
+            elif winner == local_experiment.agent2:
+                local_wins[1] += 1
+                
+        return local_wins
 
 def plot_comparison(results: Dict[str, List[Tuple[float, float]]], total_rounds: int, statistics_rounds: int):
     """绘制不同策略的比较图"""
@@ -867,6 +914,9 @@ def main():
     # 设置对比实验
     results = {}
     
+    # 添加性能监控
+    start_time = time.time()
+    
     # 添加MCTS
     print("\nRunning experiment with MCTS")
     agent1 = Agent(RandomPolicy(), None, player_id=1, name="Random")
@@ -882,6 +932,12 @@ def main():
         )
         experiment.set_agents(agent1, agent2)
         results[name] = runner.run_experiment(experiment)
+        
+        experiment_end = time.time()
+        print(f"Experiment {name} completed in {experiment_end - experiment_start:.2f} seconds")
+    
+    end_time = time.time()
+    print(f"\nTotal execution time: {end_time - start_time:.2f} seconds")
     
     # 添加DynaQ
     print("\nRunning experiment with DynaQ")
