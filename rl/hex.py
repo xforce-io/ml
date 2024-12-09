@@ -195,7 +195,7 @@ class Episode:
 class ValueEstimator:
     """值函数估计器基类"""
     def __init__(self, config: LearningConfig):
-        self.learning_rate = config.learning_rate
+        self.learning_rate = config.initial_learning_rate
         self.gamma = config.gamma
         self.q_table: Dict[Tuple[State, Action], float] = defaultdict(float)
     
@@ -621,7 +621,7 @@ class MCTSPolicy(Policy):
         return min_distance if min_distance != float('inf') else size
     
     def _calculate_center_control(self, board: Board, player: int) -> float:
-        """计算中心区域控制度"""
+        """计算中心区域控��度"""
         size = board.size
         center = size // 2
         center_score = 0.0
@@ -778,7 +778,7 @@ class MCTSPolicy(Policy):
                         board.board[x2, y2] == opponent):
                         connected_count += 1
                 
-                # 如果这步棋切断了对手的连接，增加阻挡分数
+                # 如果这步棋切断了对手的连接，增加阻挡分���
                 if connected_count > 0:
                     blocking_score += connected_count / len(directions)
         
@@ -846,39 +846,32 @@ class ExperimentRunner:
         self.statistics_rounds = statistics_rounds
         self.num_cores = num_cores or (os.cpu_count() or 4)
         self.logger = logging.getLogger(__name__)
+        # 添加超时设置
+        self.timeout = 30  # 每个批次的超时时间（秒）
     
     def _run_game_batch(self, experiment: GameExperiment, num_games: int) -> Tuple[int, int]:
         """运行一批游戏并返回胜利统计"""
-        # 创建新的实验实例
-        new_experiment = GameExperiment(experiment.board.size)
-        
-        # 复制 agent1 (Random Policy)
-        agent1 = Agent(RandomPolicy(), None, player_id=1, name="Random")
-        
-        # 复制 agent2 (MCTS)
-        agent2 = MCTSAgent(
-            simulations_per_move=3000,
-            max_depth=100,
-            c=1.732,
-            use_rave=False,
-            selection_strategy='robust',
-            base_rollouts_per_leaf=20,
-            player_id=2,
-            name="MCTS-Advanced"
-        )
-        
-        # 设置agents
-        new_experiment.set_agents(agent1, agent2)
-        
         wins1 = 0
         wins2 = 0
         
+        # 添加超时检查
+        start_time = time.time()
+        
         for _ in range(num_games):
-            winner, _ = new_experiment.play_game()
-            if winner == new_experiment.agent1:
-                wins1 += 1
-            elif winner == new_experiment.agent2:
-                wins2 += 1
+            # 检查是否超时
+            if time.time() - start_time > self.timeout:
+                self.logger.warning("Batch timeout reached")
+                break
+                
+            try:
+                winner, _ = experiment.play_game()
+                if winner == experiment.agent1:
+                    wins1 += 1
+                elif winner == experiment.agent2:
+                    wins2 += 1
+            except Exception as e:
+                self.logger.error(f"Game error: {e}")
+                continue
                 
         return wins1, wins2
         
@@ -889,36 +882,54 @@ class ExperimentRunner:
         for round_start in range(0, self.total_rounds, self.statistics_rounds):
             total_wins = [0, 0]
             
-            # 计算每个进程需要运行的游戏数
-            games_per_process = self.statistics_rounds // self.num_cores
-            remaining_games = self.statistics_rounds % self.num_cores
+            # 减小每个进程的负载
+            games_per_process = min(100, self.statistics_rounds // self.num_cores)
+            num_batches = self.statistics_rounds // games_per_process
             
-            # 创进程池
-            with concurrent.futures.ProcessPoolExecutor(max_workers=self.num_cores) as executor:
-                # 提交任务
-                future_to_batch = {
-                    executor.submit(
-                        self._run_game_batch,
-                        GameExperiment(experiment.board.size),  # 为每个进程创建新的游戏实例
-                        games_per_process + (1 if i < remaining_games else 0)
-                    ): i for i in range(self.num_cores)
-                }
-                
-                # 收集结果
-                for future in concurrent.futures.as_completed(future_to_batch):
-                    wins1, wins2 = future.result()
-                    total_wins[0] += wins1
-                    total_wins[1] += wins2
+            for batch in range(num_batches):
+                # 使用较小的进程池
+                with concurrent.futures.ProcessPoolExecutor(max_workers=min(4, self.num_cores)) as executor:
+                    try:
+                        # 设置超时
+                        future_to_batch = {
+                            executor.submit(
+                                self._run_game_batch,
+                                GameExperiment(experiment.board.size),
+                                games_per_process
+                            ): i for i in range(min(4, self.num_cores))
+                        }
+                        
+                        # 收集结果，添加超时处理
+                        for future in concurrent.futures.as_completed(future_to_batch, timeout=self.timeout):
+                            try:
+                                wins1, wins2 = future.result(timeout=5)  # 单个future的超时
+                                total_wins[0] += wins1
+                                total_wins[1] += wins2
+                            except concurrent.futures.TimeoutError:
+                                self.logger.warning("Future timeout")
+                                continue
+                            except Exception as e:
+                                self.logger.error(f"Future error: {e}")
+                                continue
+                                
+                    except Exception as e:
+                        self.logger.error(f"Batch error: {e}")
+                        continue
+                    
+                    # 清理进程池
+                    executor.shutdown(wait=False)
             
             # 计算胜率
-            win_rate1 = total_wins[0] / self.statistics_rounds
-            win_rate2 = total_wins[1] / self.statistics_rounds
-            win_rates_history.append((win_rate1, win_rate2))
+            total_games = sum(total_wins)
+            if total_games > 0:
+                win_rate1 = total_wins[0] / total_games
+                win_rate2 = total_wins[1] / total_games
+                win_rates_history.append((win_rate1, win_rate2))
+                
+                self.logger.info(f"Round {round_start + self.statistics_rounds}: "
+                               f"{experiment.agent1.name} win rate = {win_rate1:.2f}, "
+                               f"{experiment.agent2.name} win rate = {win_rate2:.2f}")
             
-            self.logger.info(f"Round {round_start + self.statistics_rounds}: "
-                           f"{experiment.agent1.name} win rate = {win_rate1:.2f}, "
-                           f"{experiment.agent2.name} win rate = {win_rate2:.2f}")
-        
         return win_rates_history
 
 def plot_comparison(results: Dict[str, List[Tuple[float, float]]], total_rounds: int, statistics_rounds: int):
@@ -1054,7 +1065,7 @@ class Evaluator:
         return metrics
 
 class TrainingVisualizer:
-    """训��过程化"""
+    """训过程化"""
     def __init__(self):
         self.metrics_history = defaultdict(list)
     
