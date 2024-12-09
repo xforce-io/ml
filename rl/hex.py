@@ -372,7 +372,7 @@ class MCTSNode:
         return (1 - beta) * (mc_score + exploration) + beta * rave_score
     
     def get_children(self) -> Dict[Action, MCTSNode]:
-        """安��地获取children"""
+        """安全地获取children"""
         return dict(self.children)  # 返回副本
 
 class MCTSPolicy(Policy):
@@ -629,7 +629,7 @@ class MCTSPolicy(Policy):
         for x in range(size):
             for y in range(size):
                 if board.board[x, y] == player:
-                    # 距离中心越近权重越大
+                    # 距离中心越权重越大
                     weight = 1.0 / (1.0 + abs(x - center) + abs(y - center))
                     center_score += weight
                     total_weights += weight
@@ -725,7 +725,7 @@ class MCTSPolicy(Policy):
                       key=lambda x: x[1].value / (x[1].visits + 1e-10))[0]
 
     def _evaluate_bridge_potential(self, board: Board, move: Action) -> float:
-        """评估形成桥接的潜力"""
+        """评估形成桥接��潜力"""
         directions = [(0,1), (1,0), (-1,0), (0,-1), (1,-1), (-1,1)]
         bridge_score = 0.0
         player = board.current_player
@@ -768,7 +768,7 @@ class MCTSPolicy(Policy):
                 
             # 检查是否有对手的棋子
             if board.board[x1, y1] == opponent:
-                # 检查这个对手棋子的连接情况
+                # 检查这个手棋子的连接情况
                 connected_count = 0
                 for dx2, dy2 in directions:
                     x2, y2 = x1 + dx2, y1 + dy2
@@ -794,6 +794,10 @@ class Agent:
         self.current_episode = Episode(player_id)
     
     def choose_action(self, board: Board) -> Action:
+        """选择动作"""
+        if self.policy is None:
+            raise ValueError("Policy is not initialized")
+            
         state = board.get_state()
         action = self.policy.get_action(board, state)
         self.current_episode.add_step(state, action)
@@ -805,7 +809,7 @@ class Agent:
         if self.estimator and board:
             self.estimator.update(self.current_episode, board)
         self.current_episode = Episode(self.player_id)
-    
+
 class GameExperiment:
     """戏实"""
     def __init__(self, board_size: int = 5):
@@ -853,6 +857,46 @@ class ExperimentRunner:
         wins1 = 0
         wins2 = 0
         
+        # 创建新的实验实例和智能体
+        local_experiment = GameExperiment(experiment.board.size)
+        
+        # 为每个批次创建新的智能体实例
+        if isinstance(experiment.agent1, MCTSAgent):
+            agent1 = MCTSAgent(
+                simulations_per_move=experiment.agent1.policy.simulations_per_move,
+                max_depth=experiment.agent1.policy.max_depth,
+                c=experiment.agent1.policy.c,
+                use_rave=experiment.agent1.policy.use_rave,
+                selection_strategy=experiment.agent1.policy.selection_strategy,
+                base_rollouts_per_leaf=experiment.agent1.policy.base_rollouts_per_leaf,
+                player_id=experiment.agent1.player_id,
+                name=experiment.agent1.name
+            )
+        else:
+            agent1 = Agent(experiment.agent1.policy.__class__(), 
+                          experiment.agent1.estimator, 
+                          experiment.agent1.player_id,
+                          experiment.agent1.name)
+
+        if isinstance(experiment.agent2, MCTSAgent):
+            agent2 = MCTSAgent(
+                simulations_per_move=experiment.agent2.policy.simulations_per_move,
+                max_depth=experiment.agent2.policy.max_depth,
+                c=experiment.agent2.policy.c,
+                use_rave=experiment.agent2.policy.use_rave,
+                selection_strategy=experiment.agent2.policy.selection_strategy,
+                base_rollouts_per_leaf=experiment.agent2.policy.base_rollouts_per_leaf,
+                player_id=experiment.agent2.player_id,
+                name=experiment.agent2.name
+            )
+        else:
+            agent2 = Agent(experiment.agent2.policy.__class__(), 
+                          experiment.agent2.estimator,
+                          experiment.agent2.player_id,
+                          experiment.agent2.name)
+        
+        local_experiment.set_agents(agent1, agent2)
+        
         # 添加超时检查
         start_time = time.time()
         
@@ -861,12 +905,12 @@ class ExperimentRunner:
             if time.time() - start_time > self.timeout:
                 self.logger.warning("Batch timeout reached")
                 break
-                
+            
             try:
-                winner, _ = experiment.play_game()
-                if winner == experiment.agent1:
+                winner, _ = local_experiment.play_game()
+                if winner == agent1:
                     wins1 += 1
-                elif winner == experiment.agent2:
+                elif winner == agent2:
                     wins2 += 1
             except Exception as e:
                 self.logger.error(f"Game error: {e}")
@@ -984,7 +1028,7 @@ def main():
         memory_size=100000
     )
 
-    # 创建实验环��
+    # 创建实验环
     experiment = GameExperiment(board_size)
     runner = ExperimentRunner(total_rounds, statistics_rounds, num_cores)
     
