@@ -152,17 +152,16 @@ class Board:
 
 @dataclass
 class LearningConfig:
-    """学习参数一配置"""
+    """学习参数配置"""
     algorithm_type: str
-    initial_learning_rate: float = 0.2    # 更高的初始学习率
-    final_learning_rate: float = 0.01     # 最终学习率
-    initial_epsilon: float = 0.3          # 更高的初始探索率
+    initial_learning_rate: float = 0.2    
+    final_learning_rate: float = 0.01     
+    initial_epsilon: float = 0.3          # 初始探索率
     final_epsilon: float = 0.05           # 最终探索率
-    gamma: float = 0.99                   # 增加折扣因子
-    min_visits: int = 10                  # 增加最小访问次数
-    planning_steps: int = 100             # 增加规划步数
-    batch_size: int = 64                  # 增加批量大小
-    memory_size: int = 50000             # 增加经验池大小
+    gamma: float = 0.99                   
+    planning_steps: int = 100             
+    batch_size: int = 64                  
+    memory_size: int = 50000             
     target_update: int = 1000
 
     def get_learning_rate(self, episode: int, total_episodes: int) -> float:
@@ -373,7 +372,7 @@ class MCTSNode:
         return (1 - beta) * (mc_score + exploration) + beta * rave_score
     
     def get_children(self) -> Dict[Action, MCTSNode]:
-        """安全地获取children"""
+        """安��地获取children"""
         return dict(self.children)  # 返回副本
 
 class MCTSPolicy(Policy):
@@ -621,7 +620,7 @@ class MCTSPolicy(Policy):
         return min_distance if min_distance != float('inf') else size
     
     def _calculate_center_control(self, board: Board, player: int) -> float:
-        """计算中心区域控��度"""
+        """计算中心区域控制度"""
         size = board.size
         center = size // 2
         center_score = 0.0
@@ -778,7 +777,7 @@ class MCTSPolicy(Policy):
                         board.board[x2, y2] == opponent):
                         connected_count += 1
                 
-                # 如果这步棋切断了对手的连接，增加阻挡分���
+                # 如果这步棋切断了对手的连接，增加阻挡分
                 if connected_count > 0:
                     blocking_score += connected_count / len(directions)
         
@@ -985,7 +984,7 @@ def main():
         memory_size=100000
     )
 
-    # 创建实验环境
+    # 创建实验环��
     experiment = GameExperiment(board_size)
     runner = ExperimentRunner(total_rounds, statistics_rounds, num_cores)
     
@@ -1176,7 +1175,8 @@ class RLAlgorithm:
     
     def _create_policy(self) -> Policy:
         """创建策略"""
-        return GreedyPolicy(self.estimator, self.config.epsilon)
+        # 使用初始 epsilon 值
+        return GreedyPolicy(self.estimator, self.config.initial_epsilon)
 
 if __name__ == "__main__":
     # 设置进启动方法（在 main 函数开始处添加）
