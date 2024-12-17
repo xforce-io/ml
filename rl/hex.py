@@ -725,7 +725,7 @@ class MCTSPolicy(Policy):
                       key=lambda x: x[1].value / (x[1].visits + 1e-10))[0]
 
     def _evaluate_bridge_potential(self, board: Board, move: Action) -> float:
-        """评估形成桥接��潜力"""
+        """评估形成桥接潜力"""
         directions = [(0,1), (1,0), (-1,0), (0,-1), (1,-1), (-1,1)]
         bridge_score = 0.0
         player = board.current_player
@@ -852,48 +852,46 @@ class ExperimentRunner:
         # 添加超时设置
         self.timeout = 30  # 每个批次的超时时间（秒）
     
-    def _run_game_batch(self, experiment: GameExperiment, num_games: int) -> Tuple[int, int]:
+    def _run_game_batch(self, board_size: int, agent1_config: dict, agent2_config: dict, num_games: int) -> Tuple[int, int]:
         """运行一批游戏并返回胜利统计"""
         wins1 = 0
         wins2 = 0
         
-        # 创建新的实验实例和智能体
-        local_experiment = GameExperiment(experiment.board.size)
+        # 创建新的实验实例
+        local_experiment = GameExperiment(board_size)
         
-        # 为每个批次创建新的智能体实例
-        if isinstance(experiment.agent1, MCTSAgent):
+        # 根据配置创建新的智能体
+        if agent1_config['type'] == 'Random':
+            agent1 = Agent(RandomPolicy(), None, player_id=1, name="Random")
+        elif agent1_config['type'] == 'MCTS':
             agent1 = MCTSAgent(
-                simulations_per_move=experiment.agent1.policy.simulations_per_move,
-                max_depth=experiment.agent1.policy.max_depth,
-                c=experiment.agent1.policy.c,
-                use_rave=experiment.agent1.policy.use_rave,
-                selection_strategy=experiment.agent1.policy.selection_strategy,
-                base_rollouts_per_leaf=experiment.agent1.policy.base_rollouts_per_leaf,
-                player_id=experiment.agent1.player_id,
-                name=experiment.agent1.name
+                simulations_per_move=agent1_config['simulations'],
+                max_depth=agent1_config['max_depth'],
+                c=agent1_config['c'],
+                use_rave=agent1_config['use_rave'],
+                selection_strategy=agent1_config['strategy'],
+                base_rollouts_per_leaf=agent1_config['base_rollouts'],
+                player_id=1,
+                name=agent1_config['name']
             )
-        else:
-            agent1 = Agent(experiment.agent1.policy.__class__(), 
-                          experiment.agent1.estimator, 
-                          experiment.agent1.player_id,
-                          experiment.agent1.name)
-
-        if isinstance(experiment.agent2, MCTSAgent):
+        
+        if agent2_config['type'] == 'Random':
+            agent2 = Agent(RandomPolicy(), None, player_id=2, name="Random")
+        elif agent2_config['type'] == 'MCTS':
             agent2 = MCTSAgent(
-                simulations_per_move=experiment.agent2.policy.simulations_per_move,
-                max_depth=experiment.agent2.policy.max_depth,
-                c=experiment.agent2.policy.c,
-                use_rave=experiment.agent2.policy.use_rave,
-                selection_strategy=experiment.agent2.policy.selection_strategy,
-                base_rollouts_per_leaf=experiment.agent2.policy.base_rollouts_per_leaf,
-                player_id=experiment.agent2.player_id,
-                name=experiment.agent2.name
+                simulations_per_move=agent2_config['simulations'],
+                max_depth=agent2_config['max_depth'],
+                c=agent2_config['c'],
+                use_rave=agent2_config['use_rave'],
+                selection_strategy=agent2_config['strategy'],
+                base_rollouts_per_leaf=agent2_config['base_rollouts'],
+                player_id=2,
+                name=agent2_config['name']
             )
-        else:
-            agent2 = Agent(experiment.agent2.policy.__class__(), 
-                          experiment.agent2.estimator,
-                          experiment.agent2.player_id,
-                          experiment.agent2.name)
+        elif agent2_config['type'] == 'DynaQ':
+            config = LearningConfig(**agent2_config['learning_config'])
+            algorithm = RLAlgorithm(config)
+            agent2 = Agent(algorithm.policy, algorithm.estimator, player_id=2, name="DynaQ")
         
         local_experiment.set_agents(agent1, agent2)
         
@@ -901,7 +899,6 @@ class ExperimentRunner:
         start_time = time.time()
         
         for _ in range(num_games):
-            # 检查是否超时
             if time.time() - start_time > self.timeout:
                 self.logger.warning("Batch timeout reached")
                 break
@@ -922,47 +919,69 @@ class ExperimentRunner:
         """并行运行实验"""
         win_rates_history = []
         
+        # 提取智能体配置
+        agent1_config = self._extract_agent_config(experiment.agent1)
+        agent2_config = self._extract_agent_config(experiment.agent2)
+        
         for round_start in range(0, self.total_rounds, self.statistics_rounds):
             total_wins = [0, 0]
-            
-            # 减小每个进程的负载
-            games_per_process = min(100, self.statistics_rounds // self.num_cores)
+            games_per_process = min(50, self.statistics_rounds // self.num_cores)  # 减小每批次的游戏数
             num_batches = self.statistics_rounds // games_per_process
             
             for batch in range(num_batches):
-                # 使用较小的进程池
+                batch_wins = [0, 0]
                 with concurrent.futures.ProcessPoolExecutor(max_workers=min(4, self.num_cores)) as executor:
+                    futures = []
+                    # 提交任务
+                    for _ in range(min(4, self.num_cores)):
+                        future = executor.submit(
+                            self._run_game_batch,
+                            experiment.board.size,
+                            agent1_config,
+                            agent2_config,
+                            games_per_process
+                        )
+                        futures.append(future)
+                    
+                    # 等待所有任务完成或超时
                     try:
-                        # 设置超时
-                        future_to_batch = {
-                            executor.submit(
-                                self._run_game_batch,
-                                GameExperiment(experiment.board.size),
-                                games_per_process
-                            ): i for i in range(min(4, self.num_cores))
-                        }
+                        # 使用更长的超时时间
+                        done, not_done = concurrent.futures.wait(
+                            futures,
+                            timeout=60,  # 增加超时时间到60秒
+                            return_when=concurrent.futures.ALL_COMPLETED
+                        )
                         
-                        # 收集结果，添加超时处理
-                        for future in concurrent.futures.as_completed(future_to_batch, timeout=self.timeout):
+                        # 处理完成的任务
+                        for future in done:
                             try:
-                                wins1, wins2 = future.result(timeout=5)  # 单个future的超时
-                                total_wins[0] += wins1
-                                total_wins[1] += wins2
-                            except concurrent.futures.TimeoutError:
-                                self.logger.warning("Future timeout")
-                                continue
+                                wins1, wins2 = future.result(timeout=1)
+                                batch_wins[0] += wins1
+                                batch_wins[1] += wins2
                             except Exception as e:
                                 self.logger.error(f"Future error: {e}")
-                                continue
-                                
-                    except Exception as e:
-                        self.logger.error(f"Batch error: {e}")
-                        continue
+                        
+                        # 处理未完成的任务
+                        if not_done:
+                            self.logger.warning(f"{len(not_done)} tasks did not complete")
+                            for future in not_done:
+                                future.cancel()
                     
-                    # 清理进程池
-                    executor.shutdown(wait=False)
+                    except Exception as e:
+                        self.logger.error(f"Batch processing error: {e}")
+                    
+                    finally:
+                        # 确保所有进程都被清理
+                        executor.shutdown(wait=False)
+                        
+                # 累加批次结果
+                total_wins[0] += batch_wins[0]
+                total_wins[1] += batch_wins[1]
+                
+                # 每个批次后输出进度
+                self.logger.info(f"Batch {batch + 1}/{num_batches} completed")
             
-            # 计算胜率
+            # 计算并记录胜率
             total_games = sum(total_wins)
             if total_games > 0:
                 win_rate1 = total_wins[0] / total_games
@@ -974,6 +993,40 @@ class ExperimentRunner:
                                f"{experiment.agent2.name} win rate = {win_rate2:.2f}")
             
         return win_rates_history
+
+    def _extract_agent_config(self, agent: Agent) -> dict:
+        """提取智能体配置"""
+        if isinstance(agent, MCTSAgent):
+            return {
+                'type': 'MCTS',
+                'simulations': agent.policy.simulations_per_move,
+                'max_depth': agent.policy.max_depth,
+                'c': agent.policy.c,
+                'use_rave': agent.policy.use_rave,
+                'strategy': agent.policy.selection_strategy,
+                'base_rollouts': agent.policy.base_rollouts_per_leaf,
+                'name': agent.name
+            }
+        elif isinstance(agent.policy, RandomPolicy):
+            return {
+                'type': 'Random',
+                'name': agent.name
+            }
+        elif isinstance(agent.policy, (GreedyPolicy, UCBPolicy)):
+            return {
+                'type': 'DynaQ',
+                'learning_config': {
+                    'algorithm_type': 'DynaQ',
+                    'initial_learning_rate': agent.estimator.learning_rate,
+                    'gamma': agent.estimator.gamma,
+                    'initial_epsilon': 0.3,
+                    'final_epsilon': 0.05,
+                    'planning_steps': 200,
+                    'batch_size': 64,
+                    'memory_size': 50000
+                },
+                'name': agent.name
+            }
 
 def plot_comparison(results: Dict[str, List[Tuple[float, float]]], total_rounds: int, statistics_rounds: int):
     """绘制不同略的比较图"""
