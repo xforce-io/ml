@@ -8,15 +8,36 @@ import random
 import logging
 import math
 import concurrent.futures
-import threading
 import time
-import os
 import sys
 import multiprocessing
-from tqdm import tqdm  # 添加在文件开头的导入部分
+import argparse
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import Matern
 from scipy.stats import norm
+
+def validate_num_cores(value: str) -> int:
+    """验证并返回合法的num_cores值"""
+    try:
+        num_cores = int(value)
+        available_cores = multiprocessing.cpu_count()
+        if num_cores < 1:
+            raise argparse.ArgumentTypeError(f"num_cores必须大于0，当前值: {num_cores}")
+        if num_cores > available_cores:
+            logging.warning(f"指定的核心数({num_cores})超过了系统可用核心数({available_cores})，将使用系统最大可用核心数")
+            return available_cores
+        return num_cores
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"num_cores必须是整数，当前值: {value}")
+
+def parse_arguments() -> argparse.Namespace:
+    """解析命令行参数"""
+    parser = argparse.ArgumentParser(description='Hex游戏AI训练程序')
+    parser.add_argument('--cores', type=validate_num_cores, default=8,
+                      help='使用的CPU核心数，默认为8')
+    parser.add_argument('--automl', action='store_true',
+                      help='是否开启自动参数优化，默认为False')
+    return parser.parse_args()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,8 +58,6 @@ class State:
     def __init__(self, board: np.ndarray, current_player: int):
         self.board = board.copy()
         self.current_player = current_player
-        self.connectivity_features = self._calculate_connectivity()
-        self.distance_to_goal = self._calculate_distance_to_goal()
     
     def __hash__(self):
         return hash((self.board.tobytes(), self.current_player))
@@ -47,16 +66,6 @@ class State:
         return (np.array_equal(self.board, other.board) and 
                 self.current_player == other.current_player)
     
-    def _calculate_connectivity(self) -> np.ndarray:
-        """计算棋盘连通性特征"""
-        # 实现连通性计算
-        pass
-        
-    def _calculate_distance_to_goal(self) -> float:
-        """计算到目标的最短距离"""
-        # 实现距离计算
-        pass
-
 class Board:
     """Hex游戏棋盘"""
     def __init__(self, size: int = 5):
@@ -904,7 +913,7 @@ class ExperimentRunner:
                 c=agent1_config['c'],
                 use_rave=agent1_config['use_rave'],
                 selection_strategy=agent1_config['strategy'],
-                base_rollouts_per_leaf=agent1_config['base_rollouts'],
+                base_rollouts_per_leaf=agent1_config['base_rollouts_per_leaf'],
                 player_id=1,
                 name=agent1_config['name']
             )
@@ -918,7 +927,7 @@ class ExperimentRunner:
                 c=agent2_config['c'],
                 use_rave=agent2_config['use_rave'],
                 selection_strategy=agent2_config['strategy'],
-                base_rollouts_per_leaf=agent2_config['base_rollouts'],
+                base_rollouts_per_leaf=agent2_config['base_rollouts_per_leaf'],
                 player_id=2,
                 name=agent2_config['name']
             )
@@ -1034,7 +1043,7 @@ class ExperimentRunner:
                 'c': agent.policy.c,
                 'use_rave': agent.policy.use_rave,
                 'strategy': agent.policy.selection_strategy,
-                'base_rollouts': agent.policy.base_rollouts_per_leaf,
+                'base_rollouts_per_leaf': agent.policy.base_rollouts_per_leaf,
                 'name': agent.name
             }
         elif isinstance(agent.policy, RandomPolicy):
@@ -1083,18 +1092,20 @@ def plot_comparison(results: Dict[str, List[Tuple[float, float]]], total_rounds:
 class ExperimentConfig:
     """实验全局配置"""
     # 基础配置
+    num_cores: int  # 必需参数放在最前面
     board_size: int = 5
     total_rounds: int = 400
     statistics_rounds: int = 200
-    num_cores: int = 8
     timeout: int = 600  # 批次超时时间（秒）
     
     # 日志配置
     log_level: int = logging.INFO
     log_format: str = '%(asctime)s - %(levelname)s - %(message)s'
 
-    assert total_rounds % statistics_rounds == 0, "total_rounds must be divisible by statistics_rounds"
-    assert statistics_rounds % num_cores == 0, "statistics_rounds must be divisible by num_cores"
+    def __post_init__(self):
+        """验证配置参数"""
+        assert self.total_rounds % self.statistics_rounds == 0, "total_rounds必须能被statistics_rounds整除"
+        assert self.statistics_rounds % self.num_cores == 0, "statistics_rounds必须能被num_cores整除"
 
 @dataclass
 class MCTSConfig:
@@ -1261,8 +1272,11 @@ def log_agent_config(agent: Agent):
     logger.info("=" * 50)
 
 def main():
+    # 解析命令行参数
+    args = parse_arguments()
+    
     # 加载实验配置
-    exp_config = ExperimentConfig()
+    exp_config = ExperimentConfig(num_cores=args.cores)
     
     # 设置日志
     logging.basicConfig(
@@ -1271,14 +1285,16 @@ def main():
     )
     
     logger = logging.getLogger(__name__)
-    logger.info("Starting experiments...")
+    logger.info(f"Starting experiments with {exp_config.num_cores} cores...")
     
     # 优化MCTS参数（可选）
-    optimize_mcts = False  # 设置为True来运行参数优化
+    optimize_mcts = args.automl  # 从命令行参数获取是否开启自动优化
     if optimize_mcts:
+        logger.info("Starting AutoML optimization for MCTS parameters...")
         optimizer = MCTSOptimizer(board_size=exp_config.board_size)
         best_params, best_score = optimizer.optimize()
         mcts_config = MCTSConfig(**best_params)
+        logger.info(f"AutoML optimization completed. Best score: {best_score:.3f}")
     else:
         mcts_config = MCTSConfig()
     
@@ -1321,7 +1337,7 @@ class MCTSOptimizer:
             'simulations': (100, 2000),    # 模拟次数范围
             'max_depth': (20, 100),        # 最大深度范围
             'c': (0.5, 3.0),              # UCB常数范围
-            'base_rollouts': (5, 40)       # 基础rollout次数范围
+            'base_rollouts_per_leaf': (5, 40)       # 基础rollout次数范围
         }
         
         # 初始化高斯过程
@@ -1362,7 +1378,7 @@ class MCTSOptimizer:
             simulations=int(params['simulations']),
             max_depth=int(params['max_depth']),
             c=float(params['c']),
-            base_rollouts_per_leaf=int(params['base_rollouts'])
+            base_rollouts_per_leaf=int(params['base_rollouts_per_leaf'])
         )
         
         # 创建实验环境
@@ -1392,7 +1408,7 @@ class MCTSOptimizer:
                 'simulations': params[0],
                 'max_depth': params[1],
                 'c': params[2],
-                'base_rollouts': params[3]
+                'base_rollouts_per_leaf': params[3]
             }
             score = self._evaluate_mcts(param_dict)
             self.X.append(params)
@@ -1418,7 +1434,7 @@ class MCTSOptimizer:
                 'simulations': best_params[0],
                 'max_depth': best_params[1],
                 'c': best_params[2],
-                'base_rollouts': best_params[3]
+                'base_rollouts_per_leaf': best_params[3]
             }
             score = self._evaluate_mcts(param_dict)
             
@@ -1436,7 +1452,7 @@ class MCTSOptimizer:
             'simulations': int(best_params[0]),
             'max_depth': int(best_params[1]),
             'c': float(best_params[2]),
-            'base_rollouts': int(best_params[3])
+            'base_rollouts_per_leaf': int(best_params[3])
         }
         
         logger.info("Optimization completed!")
