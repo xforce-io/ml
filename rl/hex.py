@@ -812,6 +812,35 @@ class Agent:
             self.estimator.update(self.current_episode, board)
         self.current_episode = Episode(self.player_id)
 
+class MCTSAgent(Agent):
+    """MCTS智能体"""
+    def __init__(self, 
+                 simulations_per_move: int = 3000,
+                 max_depth: int = 50,
+                 c: float = 1.414,
+                 use_rave: bool = False,
+                 selection_strategy: str = 'robust',
+                 base_rollouts_per_leaf: int = 20,
+                 player_id: int = 1,
+                 name: str = "MCTS"):
+        # 创建MCTS策略
+        policy = MCTSPolicy(
+            simulations_per_move=simulations_per_move,
+            max_depth=max_depth,
+            c=c,
+            use_rave=use_rave,
+            selection_strategy=selection_strategy,
+            base_rollouts_per_leaf=base_rollouts_per_leaf,
+            player_id=player_id
+        )
+        # 调用父类构造函数
+        super().__init__(
+            policy=policy,
+            estimator=None,  # MCTS不需要估计器
+            player_id=player_id,
+            name=name
+        )
+
 class GameExperiment:
     """戏实"""
     def __init__(self, board_size: int = 5):
@@ -836,7 +865,7 @@ class GameExperiment:
             t0 = time.time()
             action = current_agent.choose_action(self.board)
             t1 = time.time()
-            if t1 - t0 > 1:
+            if t1 - t0 > 1.5:
                 self.logger.info(f"Agent {current_agent.name} chose action in {t1 - t0:.2f} seconds")
             game_over, intermediate_reward = self.board.make_move(action)
             moves_count += 1
@@ -853,7 +882,7 @@ class ExperimentRunner:
     def __init__(self, total_rounds: int, statistics_rounds: int, num_cores: Optional[int] = None):
         self.total_rounds = total_rounds
         self.statistics_rounds = statistics_rounds
-        self.num_cores = num_cores or (os.cpu_count() or 4)
+        self.num_cores = num_cores
         self.logger = logging.getLogger(__name__)
         # 添加超时设置
         self.timeout = 600  # 每个批次的超时时间（秒）
@@ -936,62 +965,56 @@ class ExperimentRunner:
         for round_start in range(0, self.total_rounds, self.statistics_rounds):
             self.logger.info(f"Running round {round_start + 1} to {round_start + self.statistics_rounds} of {self.total_rounds}")
             total_wins = [0, 0]
-            games_per_process = min(50, self.statistics_rounds // self.num_cores)  # 减小每批次的游戏数
-            num_batches = self.statistics_rounds // games_per_process
+            games_per_process = self.statistics_rounds // self.num_cores
             
-            for batch in range(num_batches):
-                self.logger.info(f"Running batch {batch + 1} of {num_batches}")
-                batch_wins = [0, 0]
-                with concurrent.futures.ProcessPoolExecutor(max_workers=min(4, self.num_cores)) as executor:
-                    futures = []
-                    # 提交任务
-                    for _ in range(min(4, self.num_cores)):
-                        future = executor.submit(
-                            self._run_game_batch,
-                            experiment.board.size,
-                            agent1_config,
-                            agent2_config,
-                            games_per_process
-                        )
-                        futures.append(future)
-                    
-                    # 等待所有任务完成或超时
-                    try:
-                        # 使用更长的超时时间
-                        done, not_done = concurrent.futures.wait(
-                            futures,
-                            timeout=3600,  # 增加超时时间到60秒
-                            return_when=concurrent.futures.ALL_COMPLETED
-                        )
-                        
-                        # 处理完成的任务
-                        for future in done:
-                            try:
-                                wins1, wins2 = future.result(timeout=1)
-                                batch_wins[0] += wins1
-                                batch_wins[1] += wins2
-                            except Exception as e:
-                                self.logger.error(f"Future error: {e}")
-                        
-                        # 处理未完成的任务
-                        if not_done:
-                            self.logger.warning(f"{len(not_done)} tasks did not complete")
-                            for future in not_done:
-                                future.cancel()
-                    
-                    except Exception as e:
-                        self.logger.error(f"Batch processing error: {e}")
-                    
-                    finally:
-                        # 确保所有进程都被清理
-                        executor.shutdown(wait=False)
-                        
-                # 累加批次结果
-                total_wins[0] += batch_wins[0]
-                total_wins[1] += batch_wins[1]
+            batch_wins = [0, 0]
+            with concurrent.futures.ProcessPoolExecutor(max_workers=self.num_cores) as executor:
+                futures = []
+                # 提交任务
+                for _ in range(self.num_cores):
+                    future = executor.submit(
+                        self._run_game_batch,
+                        experiment.board.size,
+                        agent1_config,
+                        agent2_config,
+                        games_per_process
+                    )
+                    futures.append(future)
                 
-                # 每个批次后输出进度
-                self.logger.info(f"Batch {batch + 1}/{num_batches} completed")
+                # 等待所有任务完成或超时
+                try:
+                    # 使用更长的超时时间
+                    done, not_done = concurrent.futures.wait(
+                        futures,
+                        timeout=3600,  # 增加超时时间到60秒
+                        return_when=concurrent.futures.ALL_COMPLETED
+                    )
+                    
+                    # 处理完成的任务
+                    for future in done:
+                        try:
+                            wins1, wins2 = future.result(timeout=1)
+                            batch_wins[0] += wins1
+                            batch_wins[1] += wins2
+                        except Exception as e:
+                            self.logger.error(f"Future error: {e}")
+                    
+                    # 处理未完成的任务
+                    if not_done:
+                        self.logger.warning(f"{len(not_done)} tasks did not complete")
+                        for future in not_done:
+                            future.cancel()
+                
+                except Exception as e:
+                    self.logger.error(f"Batch processing error: {e}")
+                
+                finally:
+                    # 确保所有进程都被清理
+                    executor.shutdown(wait=False)
+                    
+            # 累加批次结果
+            total_wins[0] += batch_wins[0]
+            total_wins[1] += batch_wins[1]
             
             # 计算并记录胜率
             total_games = sum(total_wins)
@@ -1061,235 +1084,203 @@ def plot_comparison(results: Dict[str, List[Tuple[float, float]]], total_rounds:
     plt.legend()
     plt.show()
 
-def main():
-    # 配置实验参数
-    board_size = 5
-    total_rounds = 10000
-    statistics_rounds = 1000
-    num_cores = 1  # 在这里配置使用的CPU核心数
+@dataclass
+class ExperimentConfig:
+    """实验全局配置"""
+    # 基础配置
+    board_size: int = 5
+    total_rounds: int = 600
+    statistics_rounds: int = 200
+    num_cores: int = 8
+    timeout: int = 600  # 批次超时时间（秒）
     
-    # MCTS配置
-    mcts_configs = {
-        'MCTS-Advanced': {
-            'strategy': 'robust',
-            'simulations': 3000,      # 总迭代次数保持3000
-            'max_depth': 100,
-            'c': 1.732,
-            'use_rave': False,
-            'base_rollouts_per_leaf': 20  # 基础rollout次数设为20
-        }
-    }
-    
-    # DynaQ配置
-    config = LearningConfig(
-        algorithm_type='DynaQ',
-        initial_learning_rate=0.3,
-        final_learning_rate=0.01,
-        initial_epsilon=0.4,
-        final_epsilon=0.05,
-        gamma=0.99,
-        planning_steps=300,
-        batch_size=128,
-        memory_size=100000
+    # 日志配置
+    log_level: int = logging.INFO
+    log_format: str = '%(asctime)s - %(levelname)s - %(message)s'
+
+    assert total_rounds % statistics_rounds == 0, "total_rounds must be divisible by statistics_rounds"
+    assert statistics_rounds % num_cores == 0, "statistics_rounds must be divisible by num_cores"
+
+@dataclass
+class MCTSConfig:
+    """MCTS算法配置"""
+    strategy: str = 'robust'
+    simulations: int = 500
+    max_depth: int = 50
+    c: float = 1.732
+    use_rave: bool = False
+    base_rollouts_per_leaf: int = 20
+    name: str = "MCTS-Advanced"
+
+@dataclass
+class DynaQConfig:
+    """DynaQ算法配置"""
+    algorithm_type: str = 'DynaQ'
+    initial_learning_rate: float = 0.2
+    final_learning_rate: float = 0.01
+    initial_epsilon: float = 0.3
+    final_epsilon: float = 0.05
+    gamma: float = 0.99
+    planning_steps: int = 200
+    batch_size: int = 64
+    memory_size: int = 50000
+    name: str = "DynaQ"
+
+def create_mcts_agent(config: MCTSConfig, player_id: int) -> MCTSAgent:
+    """创建MCTS智能体"""
+    return MCTSAgent(
+        simulations_per_move=config.simulations,
+        max_depth=config.max_depth,
+        c=config.c,
+        use_rave=config.use_rave,
+        selection_strategy=config.strategy,
+        base_rollouts_per_leaf=config.base_rollouts_per_leaf,
+        player_id=player_id,
+        name=config.name
     )
 
-    # 创建实验环
-    experiment = GameExperiment(board_size)
-    runner = ExperimentRunner(total_rounds, statistics_rounds, num_cores)
-    
-    # 创算法配置
-    base_config = {
-        'epsilon': 0.1,
-        'learning_rate': 0.1,
-        'gamma': 0.95
-    }
-    
-    # 设置对比实验
-    results = {}
-    
-    # 添加性能监控
-    start_time = time.time()
-    
-    # 添加MCTS
-    print("\nRunning experiment with MCTS")
-    experiment = GameExperiment(board_size)  # 确保创建了新的实验实例
-    
-    # 设置初始agents
-    agent1 = Agent(RandomPolicy(), None, player_id=1, name="Random")
-    agent2 = MCTSAgent(
-        simulations_per_move=500,
-        max_depth=50,
-        c=1.732,
-        use_rave=False,
-        selection_strategy='robust',
-        base_rollouts_per_leaf=20,
-        player_id=2,
-        name="MCTS-Advanced"
+def create_dynaq_agent(config: DynaQConfig, player_id: int) -> Agent:
+    """创建DynaQ智能体"""
+    learning_config = LearningConfig(
+        algorithm_type=config.algorithm_type,
+        initial_learning_rate=config.initial_learning_rate,
+        final_learning_rate=config.final_learning_rate,
+        initial_epsilon=config.initial_epsilon,
+        final_epsilon=config.final_epsilon,
+        gamma=config.gamma,
+        planning_steps=config.planning_steps,
+        batch_size=config.batch_size,
+        memory_size=config.memory_size
     )
-    experiment.set_agents(agent1, agent2)
-    
-    # 运行实验
-    results["MCTS-Advanced"] = runner.run_experiment(experiment)
-    
-    # 添加DynaQ
-    print("\nRunning experiment with DynaQ")
-    config = LearningConfig(
-        algorithm_type='DynaQ',
-        initial_learning_rate=0.2,
-        final_learning_rate=0.01,
-        initial_epsilon=0.3,
-        final_epsilon=0.05,
-        gamma=0.99,
-        planning_steps=200,        # 增加规划步数
-        batch_size=64,
-        memory_size=50000
-    )
-    algorithm = RLAlgorithm(config)
+    algorithm = RLAlgorithm(learning_config)
     algorithm.policy = UCBPolicy(algorithm.estimator, c=1.0)
-    
-    agent1 = Agent(RandomPolicy(), None, player_id=1, name="Random")
-    agent2 = Agent(algorithm.policy, algorithm.estimator, 
-                  player_id=2, name="DynaQ")
-    
-    experiment.set_agents(agent1, agent2)
-    results["DynaQ"] = runner.run_experiment(experiment)
-    
-    # 绘制比较图
-    plot_comparison(results, total_rounds, statistics_rounds)
-
-class Evaluator:
-    """模估器"""
-    def __init__(self):
-        self.metrics = defaultdict(list)
-    
-    def evaluate_episode(self, episode: Episode, board: Board) -> Dict[str, float]:
-        """评估一局游戏的表现"""
-        metrics = {
-            'episode_length': len(episode.states),
-            'final_reward': episode.reward,
-            'avg_q_value': self._calculate_avg_q_value(episode),
-            'connectivity_score': self._calculate_connectivity_score(board)
-        }
-        return metrics
-
-class TrainingVisualizer:
-    """训过程化"""
-    def __init__(self):
-        self.metrics_history = defaultdict(list)
-    
-    def update(self, metrics: Dict[str, float]):
-        for key, value in metrics.items():
-            self.metrics_history[key].append(value)
-    
-    def plot_metrics(self):
-        """绘制训练指标变化趋势"""
-        plt.figure(figsize=(15, 5))
-        for key, values in self.metrics_history.items():
-            plt.plot(values, label=key)
-        plt.legend()
-        plt.show()
-
-class Model:
-    """环境模型，用于Dyna-Q的拟"""
-    def __init__(self):
-        self.state_actions = {}  # 存(state, action) -> (next_state, reward)的映射
-    
-    def update(self, state: State, action: Action, next_state: State, reward: float):
-        """更新模型"""
-        self.state_actions[(state, action)] = (next_state, reward)
-    
-    def sample(self) -> Optional[Tuple[State, Action, State, float]]:
-        """从模型中随机样一个经验"""
-        if not self.state_actions:
-            return None
-        state, action = random.choice(list(self.state_actions.keys()))
-        next_state, reward = self.state_actions[(state, action)]
-        return state, action, next_state, reward
-
-class DynaQEstimator(ValueEstimator):
-    """Dyna-Q值函数估计器"""
-    def __init__(self, config: LearningConfig):
-        super().__init__(config)
-        self.model = Model()
-        self.planning_steps = config.planning_steps
-    
-    def update(self, episode: Episode, board: Board):
-        """更新值函数和模型"""
-        for i in range(len(episode.states) - 1):
-            state = episode.states[i]
-            action = episode.actions[i]
-            next_state = episode.states[i + 1]
-            reward = episode.reward
-            
-            # 更新模型
-            self.model.update(state, action, next_state, reward)
-            
-            # 直接经验更新
-            self._update_q_value(state, action, reward, next_state, board)
-            
-            # 规划更新
-            self._planning(board)
-    
-    def _planning(self, board: Board):
-        """使用模型进行规划"""
-        for _ in range(self.planning_steps):
-            experience = self.model.sample()
-            if experience is None:
-                continue
-                
-            state, action, next_state, reward = experience
-            self._update_q_value(state, action, reward, next_state, board)
-
-class MCTSAgent(Agent):
-    """使用MCTS的智能体"""
-    def __init__(self, 
-                 simulations_per_move: int = 50, 
-                 max_depth: int = 50,
-                 c: float = 1.414, 
-                 selection_strategy: str = 'robust',
-                 use_rave: bool = False,
-                 base_rollouts_per_leaf: int = 20,
-                 player_id: int = 1, 
-                 name: str = "MCTS"):
-        policy = MCTSPolicy(
-            simulations_per_move=simulations_per_move,
-            max_depth=max_depth,
-            c=c,
-            selection_strategy=selection_strategy,
-            use_rave=use_rave,
-            base_rollouts_per_leaf=base_rollouts_per_leaf,
-            player_id=player_id
-        )
-        super().__init__(policy, None, player_id, name)
+    return Agent(algorithm.policy, algorithm.estimator, player_id=player_id, name=config.name)
 
 class RLAlgorithm:
-    """强化学习算法"""
+    """强化学习算法实现"""
     def __init__(self, config: LearningConfig):
         self.config = config
         self.estimator = self._create_estimator()
         self.policy = self._create_policy()
-    
+        
     def _create_estimator(self) -> ValueEstimator:
-        """创建值函数估计器"""
-        if self.config.algorithm_type == 'MC':
-            return MonteCarloEstimator(self.config)
-        elif self.config.algorithm_type == 'QLearning':
+        """根据配置创建值函数估计器"""
+        if self.config.algorithm_type == 'Q-learning':
             return QLearningEstimator(self.config)
         elif self.config.algorithm_type == 'SARSA':
             return SarsaEstimator(self.config)
+        elif self.config.algorithm_type == 'Monte-Carlo':
+            return MonteCarloEstimator(self.config)
         elif self.config.algorithm_type == 'DynaQ':
-            return DynaQEstimator(self.config)
+            return QLearningEstimator(self.config)  # DynaQ 使用 Q-learning 估计器
         else:
             raise ValueError(f"Unknown algorithm type: {self.config.algorithm_type}")
     
     def _create_policy(self) -> Policy:
         """创建策略"""
-        # 使用初始 epsilon 值
-        return GreedyPolicy(self.estimator, self.config.initial_epsilon)
+        if self.config.algorithm_type == 'DynaQ':
+            # DynaQ 使用 UCB 策略
+            return UCBPolicy(self.estimator, c=1.0)
+        else:
+            # 其他算法使用 ε-贪婪策略
+            return GreedyPolicy(self.estimator, epsilon=self.config.initial_epsilon)
+    
+    def update(self, state: State, action: Action, reward: float, 
+               next_state: State, board: Board):
+        """更新算法"""
+        if self.config.algorithm_type == 'DynaQ':
+            self._update_dynaq(state, action, reward, next_state, board)
+        else:
+            self.estimator._update_q_value(state, action, reward, next_state, board)
+    
+    def _update_dynaq(self, state: State, action: Action, reward: float, 
+                      next_state: State, board: Board):
+        """DynaQ 算法更新"""
+        # 实际经验更新
+        self.estimator._update_q_value(state, action, reward, next_state, board)
+        
+        # 规划更新
+        for _ in range(self.config.planning_steps):
+            # 从经验中随机采样
+            sampled_state = self._sample_state(board)
+            sampled_action = random.choice(board.get_valid_moves())
+            
+            # 使用模型预测
+            next_board = board.copy()
+            next_board.make_move(sampled_action)
+            predicted_next_state = next_board.get_state()
+            predicted_reward = self._predict_reward(sampled_state, sampled_action)
+            
+            # 更新Q值
+            self.estimator._update_q_value(
+                sampled_state, 
+                sampled_action,
+                predicted_reward,
+                predicted_next_state,
+                next_board
+            )
+    
+    def _sample_state(self, board: Board) -> State:
+        """从经验中采样状态"""
+        # 简单实现：随机生成一个合法状态
+        new_board = board.copy()
+        valid_moves = new_board.get_valid_moves()
+        if valid_moves:
+            action = random.choice(valid_moves)
+            new_board.make_move(action)
+        return new_board.get_state()
+    
+    def _predict_reward(self, state: State, action: Action) -> float:
+        """预测奖励"""
+        # 简单实现：使用当前Q值作为预测
+        return self.estimator.get_q_value(state, action)
+    
+    def get_action(self, board: Board, state: State) -> Action:
+        """获取动作"""
+        return self.policy.get_action(board, state)
+
+def main():
+    # 加载实验配置
+    exp_config = ExperimentConfig()
+    
+    # 设置日志
+    logging.basicConfig(
+        level=exp_config.log_level,
+        format=exp_config.log_format
+    )
+    
+    # 创建实验环境
+    experiment = GameExperiment(exp_config.board_size)
+    runner = ExperimentRunner(
+        exp_config.total_rounds,
+        exp_config.statistics_rounds,
+        exp_config.num_cores
+    )
+    
+    # 存储实验结果
+    results = {}
+    
+    # MCTS实验
+    print("\nRunning experiment with MCTS")
+    mcts_config = MCTSConfig()
+    agent1 = Agent(RandomPolicy(), None, player_id=1, name="Random")
+    agent2 = create_mcts_agent(mcts_config, player_id=2)
+    experiment.set_agents(agent1, agent2)
+    results[mcts_config.name] = runner.run_experiment(experiment)
+    
+    # DynaQ实验
+    print("\nRunning experiment with DynaQ")
+    dynaq_config = DynaQConfig()
+    agent1 = Agent(RandomPolicy(), None, player_id=1, name="Random")
+    agent2 = create_dynaq_agent(dynaq_config, player_id=2)
+    experiment.set_agents(agent1, agent2)
+    results[dynaq_config.name] = runner.run_experiment(experiment)
+    
+    # 绘制比较图
+    plot_comparison(results, exp_config.total_rounds, exp_config.statistics_rounds)
 
 if __name__ == "__main__":
-    # 设置进启动方法（在 main 函数开始处添加）
-    if sys.platform == 'darwin':  # macOS
+    # 设置多进程启动方法
+    if sys.platform == 'darwin':
         multiprocessing.set_start_method('spawn')
-    
     main() 
