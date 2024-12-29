@@ -1291,7 +1291,11 @@ def main():
     optimize_mcts = args.automl  # 从命令行参数获取是否开启自动优化
     if optimize_mcts:
         logger.info("Starting AutoML optimization for MCTS parameters...")
-        optimizer = MCTSOptimizer(board_size=exp_config.board_size)
+        # 使用配置中指定的核数创建优化器
+        optimizer = MCTSOptimizer(
+            board_size=exp_config.board_size,
+            num_cores=exp_config.num_cores
+        )
         best_params, best_score = optimizer.optimize()
         mcts_config = MCTSConfig(**best_params)
         logger.info(f"AutoML optimization completed. Best score: {best_score:.3f}")
@@ -1326,21 +1330,21 @@ def main():
 
 class MCTSOptimizer:
     """MCTS参数优化器"""
-    def __init__(self, board_size: int = 5, n_iterations: int = 30):
+    def __init__(self, board_size: int = 5, n_iterations: int = 30, num_cores: int = 8):
         self.board_size = board_size
         self.n_iterations = n_iterations
-        self.X = []  # 已评估的参数组合
-        self.y = []  # 对应的胜率
+        self.num_cores = num_cores  # 添加核数参数
+        self.X = []
+        self.y = []
         
         # 定义参数范围
         self.param_bounds = {
-            'simulations': (100, 2000),    # 模拟次数范围
-            'max_depth': (20, 100),        # 最大深度范围
-            'c': (0.5, 3.0),              # UCB常数范围
-            'base_rollouts_per_leaf': (5, 40)       # 基础rollout次数范围
+            'simulations': (100, 2000),
+            'max_depth': (20, 100),
+            'c': (0.5, 3.0),
+            'base_rollouts_per_leaf': (5, 40)
         }
         
-        # 初始化高斯过程
         self.gp = GaussianProcessRegressor(
             kernel=Matern(nu=2.5),
             n_restarts_optimizer=10,
@@ -1373,7 +1377,6 @@ class MCTSOptimizer:
     
     def _evaluate_mcts(self, params: dict) -> float:
         """评估MCTS配置的性能"""
-        # 创建MCTS配置
         mcts_config = MCTSConfig(
             simulations=int(params['simulations']),
             max_depth=int(params['max_depth']),
@@ -1381,18 +1384,15 @@ class MCTSOptimizer:
             base_rollouts_per_leaf=int(params['base_rollouts_per_leaf'])
         )
         
-        # 创建实验环境
         experiment = GameExperiment(self.board_size)
-        runner = ExperimentRunner(400, 200, num_cores=8)  # 使用较小的轮数进行快速评估
+        # 使用指定的核数
+        runner = ExperimentRunner(400, 200, num_cores=self.num_cores)
         
-        # 设置智能体
         agent1 = Agent(RandomPolicy(), None, player_id=1, name="Random")
         agent2 = create_mcts_agent(mcts_config, player_id=2)
         experiment.set_agents(agent1, agent2)
-        
-        # 运行实验并返回平均胜率
         results = runner.run_experiment(experiment)
-        win_rates = [rate[1] for rate in results]  # 获取MCTS智能体的胜率
+        win_rates = [rate[1] for rate in results]
         return np.mean(win_rates)
     
     def optimize(self) -> Tuple[dict, float]:
