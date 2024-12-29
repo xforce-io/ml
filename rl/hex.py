@@ -14,6 +14,9 @@ import os
 import sys
 import multiprocessing
 from tqdm import tqdm  # 添加在文件开头的导入部分
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import Matern
+from scipy.stats import norm
 
 logging.basicConfig(
     level=logging.INFO,
@@ -862,11 +865,7 @@ class GameExperiment:
         MAX_MOVES = 100
         
         while moves_count < MAX_MOVES:
-            t0 = time.time()
             action = current_agent.choose_action(self.board)
-            t1 = time.time()
-            if t1 - t0 > 1.5:
-                self.logger.info(f"Agent {current_agent.name} chose action in {t1 - t0:.2f} seconds")
             game_over, intermediate_reward = self.board.make_move(action)
             moves_count += 1
             
@@ -932,18 +931,13 @@ class ExperimentRunner:
         start_time = time.time()
         
         # 添加进度条
-        self.logger.info(f"Running {num_games} games between {agent1.name} and {agent2.name}")
         for no in range(num_games):
             if time.time() - start_time > self.timeout:
                 self.logger.warning("Batch timeout reached")
                 break
             
             try:
-                t0 = time.time()
                 winner, _ = local_experiment.play_game()
-                t1 = time.time()
-                if t1 - t0 > 1.5:
-                    self.logger.info(f"Game {no} finished in {t1 - t0:.2f} seconds with winner {winner.name}")
                 if winner == agent1:
                     wins1 += 1
                 elif winner == agent2:
@@ -963,10 +957,10 @@ class ExperimentRunner:
         agent2_config = self._extract_agent_config(experiment.agent2)
         
         for round_start in range(0, self.total_rounds, self.statistics_rounds):
-            self.logger.info(f"Running round {round_start + 1} to {round_start + self.statistics_rounds} of {self.total_rounds}")
             total_wins = [0, 0]
             games_per_process = self.statistics_rounds // self.num_cores
-            
+
+            start_time = time.time()
             batch_wins = [0, 0]
             with concurrent.futures.ProcessPoolExecutor(max_workers=self.num_cores) as executor:
                 futures = []
@@ -1023,9 +1017,10 @@ class ExperimentRunner:
                 win_rate2 = total_wins[1] / total_games
                 win_rates_history.append((win_rate1, win_rate2))
                 
-                self.logger.info(f"Round {round_start + self.statistics_rounds}: "
+                self.logger.info(f"Round {round_start} - {round_start + self.statistics_rounds}: "
                                f"{experiment.agent1.name} win rate = {win_rate1:.2f}, "
-                               f"{experiment.agent2.name} win rate = {win_rate2:.2f}")
+                               f"{experiment.agent2.name} win rate = {win_rate2:.2f}, "
+                               f"cost time = {time.time() - start_time:.2f} seconds")
             
         return win_rates_history
 
@@ -1089,7 +1084,7 @@ class ExperimentConfig:
     """实验全局配置"""
     # 基础配置
     board_size: int = 5
-    total_rounds: int = 600
+    total_rounds: int = 400
     statistics_rounds: int = 200
     num_cores: int = 8
     timeout: int = 600  # 批次超时时间（秒）
@@ -1239,6 +1234,32 @@ class RLAlgorithm:
         """获取动作"""
         return self.policy.get_action(board, state)
 
+def log_agent_config(agent: Agent):
+    """打印智能体配置信息"""
+    logger = logging.getLogger(__name__)
+    logger.info("=" * 50)
+    logger.info(f"Agent Name: {agent.name}")
+    
+    if isinstance(agent, MCTSAgent):
+        logger.info("MCTS Configuration:")
+        logger.info(f"- Simulations per move: {agent.policy.simulations_per_move}")
+        logger.info(f"- Max depth: {agent.policy.max_depth}")
+        logger.info(f"- Exploration constant (c): {agent.policy.c}")
+        logger.info(f"- Use RAVE: {agent.policy.use_rave}")
+        logger.info(f"- Selection strategy: {agent.policy.selection_strategy}")
+        logger.info(f"- Base rollouts per leaf: {agent.policy.base_rollouts_per_leaf}")
+    elif isinstance(agent.policy, RandomPolicy):
+        logger.info("Random Policy Agent")
+    elif isinstance(agent.policy, (GreedyPolicy, UCBPolicy)):
+        logger.info("DynaQ Configuration:")
+        logger.info(f"- Initial learning rate: {agent.estimator.learning_rate}")
+        logger.info(f"- Gamma: {agent.estimator.gamma}")
+        if isinstance(agent.policy, GreedyPolicy):
+            logger.info(f"- Epsilon: {agent.policy.epsilon}")
+        elif isinstance(agent.policy, UCBPolicy):
+            logger.info(f"- UCB constant: {agent.policy.c}")
+    logger.info("=" * 50)
+
 def main():
     # 加载实验配置
     exp_config = ExperimentConfig()
@@ -1248,6 +1269,18 @@ def main():
         level=exp_config.log_level,
         format=exp_config.log_format
     )
+    
+    logger = logging.getLogger(__name__)
+    logger.info("Starting experiments...")
+    
+    # 优化MCTS参数（可选）
+    optimize_mcts = False  # 设置为True来运行参数优化
+    if optimize_mcts:
+        optimizer = MCTSOptimizer(board_size=exp_config.board_size)
+        best_params, best_score = optimizer.optimize()
+        mcts_config = MCTSConfig(**best_params)
+    else:
+        mcts_config = MCTSConfig()
     
     # 创建实验环境
     experiment = GameExperiment(exp_config.board_size)
@@ -1261,23 +1294,156 @@ def main():
     results = {}
     
     # MCTS实验
-    print("\nRunning experiment with MCTS")
-    mcts_config = MCTSConfig()
+    logger.info("\nRunning experiment with MCTS")
     agent1 = Agent(RandomPolicy(), None, player_id=1, name="Random")
     agent2 = create_mcts_agent(mcts_config, player_id=2)
+    
+    # 打印智能体配置
+    log_agent_config(agent1)
+    log_agent_config(agent2)
+    
     experiment.set_agents(agent1, agent2)
     results[mcts_config.name] = runner.run_experiment(experiment)
-    
-    # DynaQ实验
-    print("\nRunning experiment with DynaQ")
-    dynaq_config = DynaQConfig()
-    agent1 = Agent(RandomPolicy(), None, player_id=1, name="Random")
-    agent2 = create_dynaq_agent(dynaq_config, player_id=2)
-    experiment.set_agents(agent1, agent2)
-    results[dynaq_config.name] = runner.run_experiment(experiment)
-    
+   
     # 绘制比较图
     plot_comparison(results, exp_config.total_rounds, exp_config.statistics_rounds)
+
+class MCTSOptimizer:
+    """MCTS参数优化器"""
+    def __init__(self, board_size: int = 5, n_iterations: int = 30):
+        self.board_size = board_size
+        self.n_iterations = n_iterations
+        self.X = []  # 已评估的参数组合
+        self.y = []  # 对应的胜率
+        
+        # 定义参数范围
+        self.param_bounds = {
+            'simulations': (100, 2000),    # 模拟次数范围
+            'max_depth': (20, 100),        # 最大深度范围
+            'c': (0.5, 3.0),              # UCB常数范围
+            'base_rollouts': (5, 40)       # 基础rollout次数范围
+        }
+        
+        # 初始化高斯过程
+        self.gp = GaussianProcessRegressor(
+            kernel=Matern(nu=2.5),
+            n_restarts_optimizer=10,
+            random_state=42
+        )
+    
+    def _acquisition_function(self, X: np.ndarray) -> np.ndarray:
+        """计算采集函数值(使用期望改进)"""
+        mu, sigma = self.gp.predict(X, return_std=True)
+        sigma = sigma.reshape(-1, 1)
+        
+        if len(self.y) == 0:
+            return mu
+        
+        # 计算期望改进
+        imp = mu - np.max(self.y)
+        Z = imp / sigma
+        ei = imp * norm.cdf(Z) + sigma * norm.pdf(Z)
+        return ei
+    
+    def _sample_parameters(self, num_samples: int = 1000) -> np.ndarray:
+        """随机采样参数组合"""
+        samples = np.random.rand(num_samples, len(self.param_bounds))
+        
+        # 将样本映射到参数范围
+        for i, (param, (low, high)) in enumerate(self.param_bounds.items()):
+            samples[:, i] = samples[:, i] * (high - low) + low
+        
+        return samples
+    
+    def _evaluate_mcts(self, params: dict) -> float:
+        """评估MCTS配置的性能"""
+        # 创建MCTS配置
+        mcts_config = MCTSConfig(
+            simulations=int(params['simulations']),
+            max_depth=int(params['max_depth']),
+            c=float(params['c']),
+            base_rollouts_per_leaf=int(params['base_rollouts'])
+        )
+        
+        # 创建实验环境
+        experiment = GameExperiment(self.board_size)
+        runner = ExperimentRunner(400, 200, num_cores=8)  # 使用较小的轮数进行快速评估
+        
+        # 设置智能体
+        agent1 = Agent(RandomPolicy(), None, player_id=1, name="Random")
+        agent2 = create_mcts_agent(mcts_config, player_id=2)
+        experiment.set_agents(agent1, agent2)
+        
+        # 运行实验并返回平均胜率
+        results = runner.run_experiment(experiment)
+        win_rates = [rate[1] for rate in results]  # 获取MCTS智能体的胜率
+        return np.mean(win_rates)
+    
+    def optimize(self) -> Tuple[dict, float]:
+        """运行贝叶斯优化"""
+        logger = logging.getLogger(__name__)
+        logger.info("Starting MCTS parameter optimization...")
+        
+        # 初始随机评估
+        n_initial = 5
+        for _ in range(n_initial):
+            params = self._sample_parameters(1)[0]
+            param_dict = {
+                'simulations': params[0],
+                'max_depth': params[1],
+                'c': params[2],
+                'base_rollouts': params[3]
+            }
+            score = self._evaluate_mcts(param_dict)
+            self.X.append(params)
+            self.y.append(score)
+        
+        # 主优化循环
+        for i in range(self.n_iterations - n_initial):
+            logger.info(f"Optimization iteration {i+1}/{self.n_iterations-n_initial}")
+            
+            # 拟合高斯过程
+            self.gp.fit(np.array(self.X), np.array(self.y))
+            
+            # 采样新的参数组合
+            new_samples = self._sample_parameters(1000)
+            ei_values = self._acquisition_function(new_samples)
+            
+            # 选择最佳参数组合
+            best_idx = np.argmax(ei_values)
+            best_params = new_samples[best_idx]
+            
+            # 评估新的参数组合
+            param_dict = {
+                'simulations': best_params[0],
+                'max_depth': best_params[1],
+                'c': best_params[2],
+                'base_rollouts': best_params[3]
+            }
+            score = self._evaluate_mcts(param_dict)
+            
+            # 更新数据
+            self.X.append(best_params)
+            self.y.append(score)
+            
+            logger.info(f"Current best score: {max(self.y):.3f}")
+            logger.info(f"Parameters: {param_dict}")
+        
+        # 返回最佳参数组合
+        best_idx = np.argmax(self.y)
+        best_params = self.X[best_idx]
+        best_param_dict = {
+            'simulations': int(best_params[0]),
+            'max_depth': int(best_params[1]),
+            'c': float(best_params[2]),
+            'base_rollouts': int(best_params[3])
+        }
+        
+        logger.info("Optimization completed!")
+        logger.info(f"Best parameters found: {best_param_dict}")
+        logger.info(f"Best score achieved: {self.y[best_idx]:.3f}")
+        
+        return best_param_dict, self.y[best_idx]
 
 if __name__ == "__main__":
     # 设置多进程启动方法
