@@ -13,6 +13,7 @@ import time
 import os
 import sys
 import multiprocessing
+from tqdm import tqdm  # 添加在文件开头的导入部分
 
 logging.basicConfig(
     level=logging.INFO,
@@ -384,7 +385,7 @@ class MCTSPolicy(Policy):
                  selection_strategy: str = 'robust',
                  player_id: int = 1,
                  max_depth: int = 50,
-                 base_rollouts_per_leaf: int = 20):  # 基础rollout次数
+                 base_rollouts_per_leaf: int = 20):
         self.simulations_per_move = simulations_per_move
         self.c = c
         self.rave_constant = rave_constant
@@ -393,6 +394,8 @@ class MCTSPolicy(Policy):
         self.player_id = player_id
         self.max_depth = max_depth
         self.base_rollouts_per_leaf = base_rollouts_per_leaf
+        # 添加logger属性
+        self.logger = logging.getLogger(__name__)
     
     def _get_dynamic_rollouts(self, board: Board) -> int:
         """根据剩余空格动态调整rollout次数"""
@@ -454,26 +457,25 @@ class MCTSPolicy(Policy):
         
         # 串行执行模拟
         for _ in range(self.simulations_per_move):
-            self._run_simulation(root, board.copy())
-        
+            board = board.copy()
+            self._run_simulation(root, board)
         return self._select_final_action(root)
     
     def _run_simulation(self, root: MCTSNode, board: Board) -> None:
         """运行单次模拟"""
         node = root
-        sim_board = board.copy()
         
         # Selection
         while not node.is_terminal() and node.is_fully_expanded():
             node = self._select_child(node)
-            sim_board.make_move(node.action)
+            board.make_move(node.action)
         
         # Expansion
         if not node.is_terminal() and not node.is_fully_expanded():
-            node = self._expand(node, sim_board)
+            node = self._expand(node, board)
         
         # Simulation
-        reward = self._simulate(sim_board)
+        reward = self._simulate(board)
         
         # Backpropagation
         self._backpropagate(node, reward)
@@ -831,7 +833,11 @@ class GameExperiment:
         MAX_MOVES = 100
         
         while moves_count < MAX_MOVES:
+            t0 = time.time()
             action = current_agent.choose_action(self.board)
+            t1 = time.time()
+            if t1 - t0 > 1:
+                self.logger.info(f"Agent {current_agent.name} chose action in {t1 - t0:.2f} seconds")
             game_over, intermediate_reward = self.board.make_move(action)
             moves_count += 1
             
@@ -850,7 +856,7 @@ class ExperimentRunner:
         self.num_cores = num_cores or (os.cpu_count() or 4)
         self.logger = logging.getLogger(__name__)
         # 添加超时设置
-        self.timeout = 30  # 每个批次的超时时间（秒）
+        self.timeout = 600  # 每个批次的超时时间（秒）
     
     def _run_game_batch(self, board_size: int, agent1_config: dict, agent2_config: dict, num_games: int) -> Tuple[int, int]:
         """运行一批游戏并返回胜利统计"""
@@ -894,17 +900,21 @@ class ExperimentRunner:
             agent2 = Agent(algorithm.policy, algorithm.estimator, player_id=2, name="DynaQ")
         
         local_experiment.set_agents(agent1, agent2)
-        
-        # 添加超时检查
         start_time = time.time()
         
-        for _ in range(num_games):
+        # 添加进度条
+        self.logger.info(f"Running {num_games} games between {agent1.name} and {agent2.name}")
+        for no in range(num_games):
             if time.time() - start_time > self.timeout:
                 self.logger.warning("Batch timeout reached")
                 break
             
             try:
+                t0 = time.time()
                 winner, _ = local_experiment.play_game()
+                t1 = time.time()
+                if t1 - t0 > 1.5:
+                    self.logger.info(f"Game {no} finished in {t1 - t0:.2f} seconds with winner {winner.name}")
                 if winner == agent1:
                     wins1 += 1
                 elif winner == agent2:
@@ -924,11 +934,13 @@ class ExperimentRunner:
         agent2_config = self._extract_agent_config(experiment.agent2)
         
         for round_start in range(0, self.total_rounds, self.statistics_rounds):
+            self.logger.info(f"Running round {round_start + 1} to {round_start + self.statistics_rounds} of {self.total_rounds}")
             total_wins = [0, 0]
             games_per_process = min(50, self.statistics_rounds // self.num_cores)  # 减小每批次的游戏数
             num_batches = self.statistics_rounds // games_per_process
             
             for batch in range(num_batches):
+                self.logger.info(f"Running batch {batch + 1} of {num_batches}")
                 batch_wins = [0, 0]
                 with concurrent.futures.ProcessPoolExecutor(max_workers=min(4, self.num_cores)) as executor:
                     futures = []
@@ -948,7 +960,7 @@ class ExperimentRunner:
                         # 使用更长的超时时间
                         done, not_done = concurrent.futures.wait(
                             futures,
-                            timeout=60,  # 增加超时时间到60秒
+                            timeout=3600,  # 增加超时时间到60秒
                             return_when=concurrent.futures.ALL_COMPLETED
                         )
                         
@@ -1054,7 +1066,7 @@ def main():
     board_size = 5
     total_rounds = 10000
     statistics_rounds = 1000
-    num_cores = 8  # 在这里配置使用的CPU核心数
+    num_cores = 1  # 在这里配置使用的CPU核心数
     
     # MCTS配置
     mcts_configs = {
@@ -1105,8 +1117,8 @@ def main():
     # 设置初始agents
     agent1 = Agent(RandomPolicy(), None, player_id=1, name="Random")
     agent2 = MCTSAgent(
-        simulations_per_move=3000,
-        max_depth=100,
+        simulations_per_move=500,
+        max_depth=50,
         c=1.732,
         use_rave=False,
         selection_strategy='robust',
