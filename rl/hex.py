@@ -1354,15 +1354,23 @@ class MCTSOptimizer:
     def _acquisition_function(self, X: np.ndarray) -> np.ndarray:
         """计算采集函数值(使用期望改进)"""
         mu, sigma = self.gp.predict(X, return_std=True)
-        sigma = sigma.reshape(-1, 1)
+        
+        # 确保形状正确
+        mu = mu.reshape(-1)
+        sigma = sigma.reshape(-1)
         
         if len(self.y) == 0:
             return mu
         
         # 计算期望改进
-        imp = mu - np.max(self.y)
-        Z = imp / sigma
+        best_f = np.max(self.y)
+        imp = mu - best_f
+        Z = np.divide(imp, sigma, out=np.zeros_like(imp), where=sigma!=0)
         ei = imp * norm.cdf(Z) + sigma * norm.pdf(Z)
+        
+        # 处理可能的数值不稳定性
+        ei[sigma == 0.0] = 0.0
+        
         return ei
     
     def _sample_parameters(self, num_samples: int = 1000) -> np.ndarray:
@@ -1419,11 +1427,18 @@ class MCTSOptimizer:
             logger.info(f"Optimization iteration {i+1}/{self.n_iterations-n_initial}")
             
             # 拟合高斯过程
-            self.gp.fit(np.array(self.X), np.array(self.y))
+            X_array = np.array(self.X)
+            y_array = np.array(self.y)
+            self.gp.fit(X_array, y_array)
             
             # 采样新的参数组合
             new_samples = self._sample_parameters(1000)
             ei_values = self._acquisition_function(new_samples)
+            
+            # 确保ei_values的形状正确
+            if len(ei_values) != len(new_samples):
+                logger.error(f"Shape mismatch: ei_values shape: {ei_values.shape}, new_samples shape: {new_samples.shape}")
+                continue
             
             # 选择最佳参数组合
             best_idx = np.argmax(ei_values)
