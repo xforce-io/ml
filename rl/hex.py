@@ -1111,11 +1111,11 @@ class ExperimentConfig:
 class MCTSConfig:
     """MCTS算法配置"""
     strategy: str = 'robust'
-    simulations: int = 500
-    max_depth: int = 50
-    c: float = 1.732
+    simulations: int = 1600
+    max_depth: int = 100
+    c: float = 0.80
     use_rave: bool = False
-    base_rollouts_per_leaf: int = 20
+    base_rollouts_per_leaf: int = 40
     name: str = "MCTS-Advanced"
 
 @dataclass
