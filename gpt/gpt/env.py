@@ -11,10 +11,12 @@ from gpt.gpt import GPT
 import wandb
 import os
 import numpy as np
+from gpt.model_cache import ModelCacheManager
 
 class Env:
     def __init__(self, config: ExperimentConfig):
         self.config = config
+        self.model_cache = ModelCacheManager()
         
         # 检测并设置设备
         if torch.backends.mps.is_available():
@@ -88,6 +90,19 @@ class Env:
         return result
     
     def train_model(self) -> GPT:
+        # 检查缓存
+        cached_model_path = self.model_cache.get_cache_path(
+            self.config.model_config,
+            self.config.training_config,
+            self.config.data_config
+        )
+        
+        if cached_model_path:
+            print(f"找到缓存模型，从 {cached_model_path} 加载")
+            return GPT.from_pretrained(cached_model_path, device=self.device)
+        
+        print("未找到缓存模型，开始训练...")
+        
         # 初始化模型
         model = GPT(self.config.model_config).to(self.device)
         
@@ -98,6 +113,17 @@ class Env:
             remove_columns=self.dataset.column_names["train"],
             load_from_cache_file=False
         )
+        
+        # 采样训练数据
+        if hasattr(self.config.data_config, 'train_subset_ratio') and self.config.data_config.train_subset_ratio < 1.0:
+            train_size = len(processed_datasets["train"])
+            subset_size = int(train_size * self.config.data_config.train_subset_ratio)
+            # 随机采样，但固定随机种子以保证可复现性
+            rng = np.random.default_rng(42)
+            subset_indices = rng.choice(train_size, size=subset_size, replace=False)
+            processed_datasets["train"] = processed_datasets["train"].select(subset_indices)
+            print(f"使用 {self.config.data_config.train_subset_ratio:.1%} 的训练数据进行训练 "
+                  f"({subset_size}/{train_size})")
         
         # 设置数据集格式
         processed_datasets.set_format(type='torch', columns=['input_ids', 'attention_mask', 'labels'])
@@ -132,9 +158,10 @@ class Env:
         )
         
         # 初始化 wandb
-        if self.config.use_wandb:
+        if self.config.wandb_config.enabled:
             wandb.init(
-                project="gpt-attention-comparison",
+                project=self.config.wandb_config.project,
+                name=self.config.wandb_config.name,
                 config=self.config.__dict__
             )
         
@@ -152,7 +179,7 @@ class Env:
             lr_scheduler.step()
             
             # 记录到 wandb
-            if self.config.use_wandb:
+            if self.config.wandb_config.enabled:
                 wandb.log({
                     "epoch": epoch,
                     **metrics
@@ -164,6 +191,14 @@ class Env:
             f"{self.config.model_config.attention_type}"
         )
         model.save_pretrained(model_save_path)
+        
+        # 将模型保存到缓存
+        self.model_cache.save_model_to_cache(
+            model_path=model_save_path,
+            model_config=self.config.model_config,
+            training_config=self.config.training_config,
+            data_config=self.config.data_config
+        )
         
         return model
     

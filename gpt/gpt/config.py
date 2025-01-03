@@ -36,14 +36,21 @@ class DataConfig:
     max_length: int = 512
     block_size: int = 128
     stride: int = 64
+    train_subset_ratio: float = 1.0
+
+@dataclass
+class WandBConfig:
+    enabled: bool = False
+    project: str = "gpt-attention-comparison"
+    name: Optional[str] = None
 
 @dataclass
 class ExperimentConfig:
     model_config: ModelConfig
     training_config: TrainingConfig
     data_config: DataConfig
+    wandb_config: WandBConfig
     output_dir: str = "outputs"
-    use_wandb: bool = True
     seed: int = 42
     task_name: str = "mrpc"  # 用于 GLUE benchmark
 
@@ -62,6 +69,7 @@ class Config:
         self.model_config = ModelConfig(**config_dict.get('model', {}))
         self.training_config = TrainingConfig(**config_dict.get('training', {}))
         self.data_config = DataConfig(**config_dict.get('data', {}))
+        self.wandb_config = WandBConfig(**config_dict.get('wandb', {}))
         
         # 创建实验配置
         experiment_dict = config_dict.get('experiment', {})
@@ -69,6 +77,7 @@ class Config:
             model_config=self.model_config,
             training_config=self.training_config,
             data_config=self.data_config,
+            wandb_config=self.wandb_config,
             **experiment_dict
         )
     

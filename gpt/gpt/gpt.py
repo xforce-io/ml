@@ -80,6 +80,7 @@ class GroupedQueryAttention(AttentionBase):
         
         scores = torch.matmul(q, k.transpose(-2, -1)) / torch.sqrt(torch.tensor(self.head_dim))
         if attention_mask is not None:
+            attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
             scores = scores + attention_mask
 
         attn_weights = F.softmax(scores, dim=-1)
@@ -363,68 +364,3 @@ class GPT(nn.Module):
         print("-" * 80)
         
         return epoch_metrics
-
-class BenchmarkBase:
-    def __init__(self):
-        self.results = {}
-        
-    def measure_memory(self) -> float:
-        """测量 GPU 显存使用峰值（以 GB 为单位）"""
-        return max_memory_allocated() / (1024 ** 3)
-    
-    def measure_cpu_memory(self) -> float:
-        """测量 CPU 内存使用（以 GB 为单位）"""
-        return psutil.Process().memory_info().rss / (1024 ** 3)
-    
-    def reset_memory_stats(self):
-        reset_peak_memory_stats()
-    
-    def log_metrics(self, model_type: str, metrics: dict):
-        self.results[model_type] = metrics
-        
-    def print_results(self):
-        print("\n=== Benchmark Results ===")
-        for model_type, metrics in self.results.items():
-            print(f"\nModel: {model_type}")
-            for metric_name, value in metrics.items():
-                print(f"{metric_name}: {value}")
-
-class BenchmarkGLUE(BenchmarkBase):
-    def __init__(self, task_name: str = "mrpc", cache_dir: Optional[str] = None):
-        super().__init__()
-        self.task_name = task_name
-        self.cache_dir = cache_dir
-        # 这里可以添加 GLUE 数据集加载逻辑
-        if self.cache_dir:
-            self.dataset = load_dataset("glue", self.task_name, cache_dir=self.cache_dir)
-        else:
-            self.dataset = load_dataset("glue", self.task_name)
-        
-    def run_benchmark(self, model: GPT, batch_size: int = 32, num_batches: int = 10):
-        device = next(model.parameters()).device
-        model.eval()
-        
-        # 模拟 GLUE 任务的输入数据
-        input_ids = torch.randint(0, model.config.vocab_size, (batch_size, 512), device=device)
-        attention_mask = torch.ones_like(input_ids)
-        
-        # 测量推理速度
-        start_time = time.time()
-        self.reset_memory_stats()
-        
-        with torch.no_grad():
-            for _ in range(num_batches):
-                _ = model(input_ids, attention_mask)
-        
-        inference_time = (time.time() - start_time) / num_batches
-        gpu_memory = self.measure_memory()
-        cpu_memory = self.measure_cpu_memory()
-        
-        metrics = {
-            "avg_inference_time": f"{inference_time:.4f}s",
-            "gpu_memory_usage": f"{gpu_memory:.2f}GB",
-            "cpu_memory_usage": f"{cpu_memory:.2f}GB",
-            # 这里可以添加准确率等其他指标
-        }
-        
-        self.log_metrics(f"{model.config.attention_type.upper()}", metrics)

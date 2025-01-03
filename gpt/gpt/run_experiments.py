@@ -1,61 +1,64 @@
 import os
+import copy
+import wandb
+import torch
+import numpy as np
+import random
 from gpt.config import Config, ModelConfig, ExperimentConfig
 from gpt.env import Env
+
+def set_seed(seed: int):
+    """设置随机种子以确保实验可重现"""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    if torch.backends.mps.is_available():
+        torch.mps.manual_seed(seed)
 
 def main():
     # 加载配置
     config = Config()
     
-    # 创建不同的实验配置
+    # 设置随机种子
+    set_seed(config.experiment_config.seed)
+    
+    # 创建环境
+    env = Env(
+        config=config.experiment_config
+    )
+    
+    # 运行实验
     configs = []
     
     # MHA 配置
-    mha_config = ExperimentConfig(
-        model_config=ModelConfig(**{
-            **config.model_config.__dict__,
-            "attention_type": "mha"
-        }),
-        training_config=config.training_config,
-        data_config=config.data_config,
-        output_dir="outputs/mha",
-        use_wandb=config.experiment_config.use_wandb,
-        task_name=config.experiment_config.task_name
-    )
+    mha_config = copy.deepcopy(config.experiment_config)
+    mha_config.model_config.attention_type = "mha"
+    mha_config.model_config.num_kv_heads = None
     configs.append(mha_config)
     
     # GQA 配置
-    gqa_config = ExperimentConfig(
-        model_config=ModelConfig(**{
-            **config.model_config.__dict__,
-            "attention_type": "gqa",
-            "num_kv_heads": 4
-        }),
-        training_config=config.training_config,
-        data_config=config.data_config,
-        output_dir="outputs/gqa",
-        use_wandb=config.experiment_config.use_wandb,
-        task_name=config.experiment_config.task_name
-    )
+    gqa_config = copy.deepcopy(config.experiment_config)
+    gqa_config.model_config.attention_type = "gqa"
+    gqa_config.model_config.num_kv_heads = 4
     configs.append(gqa_config)
     
     # MQA 配置
-    mqa_config = ExperimentConfig(
-        model_config=ModelConfig(**{
-            **config.model_config.__dict__,
-            "attention_type": "mqa",
-            "num_kv_heads": 1
-        }),
-        training_config=config.training_config,
-        data_config=config.data_config,
-        output_dir="outputs/mqa",
-        use_wandb=config.experiment_config.use_wandb,
-        task_name=config.experiment_config.task_name
-    )
+    mqa_config = copy.deepcopy(config.experiment_config)
+    mqa_config.model_config.attention_type = "mqa"
+    mqa_config.model_config.num_kv_heads = 1
     configs.append(mqa_config)
     
     # 运行实验
-    env = Env(configs[0])  # 使用第一个配置初始化环境
     env.run_experiments(configs)
+    
+    # 如果启用了 wandb，关闭它
+    if config.wandb_config.enabled:
+        wandb.finish()
 
 if __name__ == "__main__":
     os.environ["HF_HUB_OFFLINE"] = "1"
