@@ -83,7 +83,9 @@ class GroupedQueryAttention(AttentionBase):
         scores = torch.matmul(q, k.unsqueeze(2).transpose(-2, -1)) / torch.sqrt(torch.tensor(self.head_dim))
         
         if attention_mask is not None:
-            attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
+            # 调整 attention_mask 的维度以匹配 scores
+            # scores shape: [B, num_kv_heads, num_heads_per_kv, seq_len, seq_len]
+            attention_mask = attention_mask.unsqueeze(1).unsqueeze(1).unsqueeze(1)  # [B, 1, 1, 1, seq_len]
             scores = scores + attention_mask
         
         attn_weights = F.softmax(scores, dim=-1)
