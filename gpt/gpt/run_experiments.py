@@ -2,10 +2,24 @@ import os
 import copy
 import wandb
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel as DDP
 import numpy as np
 import random
 from gpt.config import Config, ModelConfig, ExperimentConfig
 from gpt.env import Env
+
+def setup_distributed(rank: int, world_size: int):
+    """设置分布式训练环境"""
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '29500'
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    torch.cuda.set_device(rank)
+
+def cleanup_distributed():
+    """清理分布式训练环境"""
+    dist.destroy_process_group()
 
 def set_seed(seed: int):
     """设置随机种子以确保实验可重现"""
@@ -21,15 +35,25 @@ def set_seed(seed: int):
         torch.mps.manual_seed(seed)
 
 def main():
+    # 检查是否在分布式环境中运行
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    
+    if local_rank != -1:
+        # 分布式训练设置
+        setup_distributed(local_rank, world_size)
+    
     # 加载配置
     config = Config()
     
     # 设置随机种子
-    set_seed(config.experiment_config.seed)
+    set_seed(config.experiment_config.seed + local_rank)  # 每个进程使用不同的种子
     
     # 创建环境
     env = Env(
-        config=config.experiment_config
+        config=config.experiment_config,
+        local_rank=local_rank,
+        world_size=world_size
     )
     
     # 运行实验
@@ -57,8 +81,12 @@ def main():
     env.run_experiments(configs)
     
     # 如果启用了 wandb，关闭它
-    if config.wandb_config.enabled:
+    if config.wandb_config.enabled and local_rank in [-1, 0]:
         wandb.finish()
+    
+    # 清理分布式环境
+    if local_rank != -1:
+        cleanup_distributed()
 
 if __name__ == "__main__":
     os.environ["HF_HUB_OFFLINE"] = "1"

@@ -4,6 +4,7 @@ import torch
 from torch.utils.data import DataLoader
 from datasets import load_dataset
 from transformers import AutoTokenizer, get_scheduler
+from torch.nn import DDP
 
 from gpt.config import Config, ExperimentConfig
 from gpt.benchmark import BenchmarkGLUE
@@ -14,12 +15,18 @@ import numpy as np
 from gpt.model_cache import ModelCacheManager
 
 class Env:
-    def __init__(self, config: ExperimentConfig):
+    def __init__(self, config: ExperimentConfig, local_rank: int = -1, world_size: int = 1):
         self.config = config
         self.model_cache = ModelCacheManager()
+        self.local_rank = local_rank
+        self.world_size = world_size
         
         # 检测并设置设备
-        if torch.backends.mps.is_available():
+        if local_rank != -1:  # 分布式训练
+            self.device = torch.device(f"cuda:{local_rank}")
+            if local_rank == 0:
+                print(f"使用 {world_size} 个 GPU 进行分布式训练")
+        elif torch.backends.mps.is_available():
             self.device = torch.device("mps")
             print("使用 MPS (Metal Performance Shaders) 设备加速训练")
         elif torch.cuda.is_available():
@@ -54,8 +61,9 @@ class Env:
         self.tokenizer.pad_token = self.tokenizer.eos_token
         
         # 创建输出目录
-        os.makedirs(config.output_dir, exist_ok=True)
-        
+        if local_rank in [-1, 0]:  # 主进程创建目录
+            os.makedirs(config.output_dir, exist_ok=True)
+    
     def preprocess_function(self, examples):
         # 对文本进行编码
         tokenized = self.tokenizer(
@@ -98,13 +106,20 @@ class Env:
         )
         
         if cached_model_path:
-            print(f"找到缓存模型，从 {cached_model_path} 加载")
-            return GPT.from_pretrained(cached_model_path, device=self.device)
+            if self.local_rank in [-1, 0]:
+                print(f"找到缓存模型，从 {cached_model_path} 加载")
+            model = GPT.from_pretrained(cached_model_path, device=self.device)
+            if self.local_rank != -1:
+                model = DDP(model, device_ids=[self.local_rank])
+            return model
         
-        print("未找到缓存模型，开始训练...")
+        if self.local_rank in [-1, 0]:
+            print("未找到缓存模型，开始训练...")
         
         # 初始化模型
         model = GPT(self.config.model_config).to(self.device)
+        if self.local_rank != -1:
+            model = DDP(model, device_ids=[self.local_rank])
         
         # 预处理数据集
         processed_datasets = self.dataset.map(
@@ -122,17 +137,25 @@ class Env:
             rng = np.random.default_rng(42)
             subset_indices = rng.choice(train_size, size=subset_size, replace=False)
             processed_datasets["train"] = processed_datasets["train"].select(subset_indices)
-            print(f"使用 {self.config.data_config.train_subset_ratio:.1%} 的训练数据进行训练 "
-                  f"({subset_size}/{train_size})")
+            if self.local_rank in [-1, 0]:
+                print(f"使用 {self.config.data_config.train_subset_ratio:.1%} 的训练数据进行训练 "
+                      f"({subset_size}/{train_size})")
         
         # 设置数据集格式
         processed_datasets.set_format(type='torch', columns=['input_ids', 'attention_mask', 'labels'])
         
         # 创建数据加载器
+        train_sampler = (
+            torch.utils.data.DistributedSampler(processed_datasets["train"])
+            if self.local_rank != -1
+            else None
+        )
+        
         train_dataloader = DataLoader(
             processed_datasets["train"],
             batch_size=self.config.training_config.train_batch_size,
-            shuffle=True
+            shuffle=(train_sampler is None),
+            sampler=train_sampler
         )
         
         if "validation" in processed_datasets:
@@ -158,7 +181,7 @@ class Env:
         )
         
         # 初始化 wandb
-        if self.config.wandb_config.enabled:
+        if self.config.wandb_config.enabled and self.local_rank in [-1, 0]:
             wandb.init(
                 project=self.config.wandb_config.project,
                 name=self.config.wandb_config.name,
@@ -167,38 +190,45 @@ class Env:
         
         # 训练循环
         for epoch in range(self.config.training_config.num_epochs):
+            if train_sampler is not None:
+                train_sampler.set_epoch(epoch)
+            
             # 使用 GPT 类的 train_epoch 方法
             metrics = model.train_epoch(
                 train_dataloader=train_dataloader,
                 optimizer=optimizer,
                 epoch=epoch,
-                val_dataloader=val_dataloader
+                val_dataloader=val_dataloader if self.local_rank in [-1, 0] else None
             )
             
             # 更新学习率
             lr_scheduler.step()
             
             # 记录到 wandb
-            if self.config.wandb_config.enabled:
+            if self.config.wandb_config.enabled and self.local_rank in [-1, 0]:
                 wandb.log({
                     "epoch": epoch,
                     **metrics
                 })
         
-        # 保存模型
-        model_save_path = os.path.join(
-            self.config.output_dir, 
-            f"{self.config.model_config.attention_type}"
-        )
-        model.save_pretrained(model_save_path)
-        
-        # 将模型保存到缓存
-        self.model_cache.save_model_to_cache(
-            model_path=model_save_path,
-            model_config=self.config.model_config,
-            training_config=self.config.training_config,
-            data_config=self.config.data_config
-        )
+        # 保存模型（只在主进程上进行）
+        if self.local_rank in [-1, 0]:
+            model_save_path = os.path.join(
+                self.config.output_dir, 
+                f"{self.config.model_config.attention_type}"
+            )
+            if isinstance(model, DDP):
+                model.module.save_pretrained(model_save_path)
+            else:
+                model.save_pretrained(model_save_path)
+            
+            # 将模型保存到缓存
+            self.model_cache.save_model_to_cache(
+                model_path=model_save_path,
+                model_config=self.config.model_config,
+                training_config=self.config.training_config,
+                data_config=self.config.data_config
+            )
         
         return model
     
