@@ -394,6 +394,9 @@ class GPT(nn.Module):
         Returns:
             包含训练和验证指标的字典
         """
+        # 如果是 DistributedDataParallel 模型，获取原始模型
+        model = self.module if hasattr(self, 'module') else self
+        
         epoch_start_time = time.time()
         
         running_loss = 0.0
@@ -411,9 +414,9 @@ class GPT(nn.Module):
         
         for batch in progress_bar:
             batch_start_time = time.time()
-            batch = {k: v.to(next(self.parameters()).device) for k, v in batch.items()}
+            batch = {k: v.to(next(model.parameters()).device) for k, v in batch.items()}
             
-            metrics = self.train_step(batch, optimizer)
+            metrics = model.train_step(batch, optimizer)
             batch_size = len(batch["input_ids"])
             running_loss += metrics["loss"] * batch_size
             running_samples += batch_size
@@ -446,7 +449,7 @@ class GPT(nn.Module):
         
         # 如果提供了验证集，进行验证
         if val_dataloader is not None:
-            val_metrics = self.evaluate(val_dataloader)
+            val_metrics = model.evaluate(val_dataloader)
             epoch_metrics.update({
                 "val_loss": val_metrics["loss"],
                 "val_perplexity": val_metrics["perplexity"],
@@ -454,20 +457,21 @@ class GPT(nn.Module):
             })
         
         # 打印 epoch 总结
-        print(f"\nEpoch {epoch} Summary:")
-        print(
-            f"Training - Loss: {epoch_metrics['train_loss']:.4f}, "
-            f"PPL: {epoch_metrics['train_perplexity']:.2f}, "
-            f"Grad Norm: {epoch_metrics['train_grad_norm']:.2f}, "
-            f"Speed: {epoch_metrics['train_samples_per_second']:.1f} samples/s"
-        )
-        if val_dataloader is not None:
+        if torch.distributed.get_rank() == 0:  # 只在主进程打印
+            print(f"\nEpoch {epoch} Summary:")
             print(
-                f"Validation - Loss: {epoch_metrics['val_loss']:.4f}, "
-                f"PPL: {epoch_metrics['val_perplexity']:.2f}, "
-                f"Speed: {epoch_metrics['val_samples_per_second']:.1f} samples/s"
+                f"Training - Loss: {epoch_metrics['train_loss']:.4f}, "
+                f"PPL: {epoch_metrics['train_perplexity']:.2f}, "
+                f"Grad Norm: {epoch_metrics['train_grad_norm']:.2f}, "
+                f"Speed: {epoch_metrics['train_samples_per_second']:.1f} samples/s"
             )
-        print(f"Time - Training: {epoch_metrics['epoch_time']:.2f}s")
-        print("-" * 80)
+            if val_dataloader is not None:
+                print(
+                    f"Validation - Loss: {epoch_metrics['val_loss']:.4f}, "
+                    f"PPL: {epoch_metrics['val_perplexity']:.2f}, "
+                    f"Speed: {epoch_metrics['val_samples_per_second']:.1f} samples/s"
+                )
+            print(f"Time - Training: {epoch_metrics['epoch_time']:.2f}s")
+            print("-" * 80)
         
         return epoch_metrics
