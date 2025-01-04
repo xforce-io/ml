@@ -71,10 +71,10 @@ class BenchmarkBase:
 
     def print_results_as_markdown(self):
         """打印结果为 markdown 表格"""
-        print("| Model Type | Inference Time (s) | GPU Memory (GB) |")
-        print("| --- | --- | --- |")
+        print("| Model Type | Inference Time (s) | GPU Memory (GB) | Accuracy |")
+        print("| --- | --- | --- | --- |")
         for model_type, metrics in self.results.items():
-            print(f"| {model_type} | {metrics['avg_inference_time']} | {metrics['peak_gpu_memory']} |")
+            print(f"| {model_type} | {metrics['avg_inference_time']} | {metrics['peak_gpu_memory']} | {metrics['accuracy']} |")
 
 class BenchmarkGLUE(BenchmarkBase):
     def __init__(self, task_name: str = "mrpc", num_shots: int = 8):
