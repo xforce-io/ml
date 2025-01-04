@@ -4,7 +4,7 @@ import torch
 from torch.utils.data import DataLoader
 from datasets import load_dataset
 from transformers import AutoTokenizer, get_scheduler
-from torch.nn import DDP
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 from gpt.config import Config, ExperimentConfig
 from gpt.benchmark import BenchmarkGLUE
@@ -234,6 +234,9 @@ class Env:
     
     def run_experiments(self, configs: List[ExperimentConfig]):
         """运行多个实验并比较结果"""
+
+        print(f"Running experiments[{self.config.name}] on {self.local_rank} with {self.world_size} GPUs")
+
         benchmark = BenchmarkGLUE(task_name=self.config.task_name)
         models = []
         
@@ -247,4 +250,3 @@ class Env:
         benchmark.plot_results(
             save_path=os.path.join(self.config.output_dir, "comparison.png")
         )
-        benchmark.print_results() 

@@ -3,11 +3,8 @@ import copy
 import wandb
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
-from torch.nn.parallel import DistributedDataParallel as DDP
 import numpy as np
 import random
-from gpt.config import Config, ModelConfig, ExperimentConfig
 from gpt.env import Env
 
 def setup_distributed(rank: int, world_size: int):
@@ -63,18 +60,21 @@ def main():
     mha_config = copy.deepcopy(config.experiment_config)
     mha_config.model_config.attention_type = "mha"
     mha_config.model_config.num_kv_heads = None
+    mha_config.name = "mha"
     configs.append(mha_config)
     
     # GQA 配置
     gqa_config = copy.deepcopy(config.experiment_config)
     gqa_config.model_config.attention_type = "gqa"
     gqa_config.model_config.num_kv_heads = 4
+    gqa_config.name = "gqa"
     configs.append(gqa_config)
     
     # MQA 配置
     mqa_config = copy.deepcopy(config.experiment_config)
     mqa_config.model_config.attention_type = "mqa"
     mqa_config.model_config.num_kv_heads = 1
+    mqa_config.name = "mqa"
     configs.append(mqa_config)
     
     # 运行实验

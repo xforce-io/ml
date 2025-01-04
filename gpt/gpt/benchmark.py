@@ -161,9 +161,14 @@ class BenchmarkGLUE(BenchmarkBase):
         all_predictions = []
         all_labels = []
         
+        # 清理 GPU 缓存并重置内存统计
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
+        
         # 记录开始时间和内存
         start_time = time.time()
-        self.reset_memory_stats()
+        initial_memory = self.measure_memory()
         
         # 使用进度条
         progress_bar = tqdm(
@@ -179,39 +184,50 @@ class BenchmarkGLUE(BenchmarkBase):
             for label in label_tokens
         ]
         
-        for i in progress_bar:
-            batch_examples = [dict(eval_dataset[j]) for j in range(i, min(i + batch_size, len(eval_dataset)))]
-            batch_prompts = [
-                self._prepare_few_shot_prompt(few_shot_examples, example)
-                for example in batch_examples
-            ]
-            
-            # 编码输入
-            inputs = self.tokenizer(
-                batch_prompts,
-                padding=True,
-                truncation=True,
-                max_length=512,
-                return_tensors="pt"
-            ).to(device)
-            
-            # 生成预测
-            with torch.no_grad():
-                outputs = model(**inputs)
-                logits = outputs["logits"]
+        try:
+            for i in progress_bar:
+                batch_examples = [dict(eval_dataset[j]) for j in range(i, min(i + batch_size, len(eval_dataset)))]
+                batch_prompts = [
+                    self._prepare_few_shot_prompt(few_shot_examples, example)
+                    for example in batch_examples
+                ]
                 
-                # 只在标签 token 中选择
-                last_token_logits = logits[:, -1, :]  # [batch_size, vocab_size]
-                label_logits = last_token_logits[:, label_token_ids]  # [batch_size, num_labels]
-                predictions = label_logits.argmax(dim=-1)  # [batch_size]
-            
-            all_predictions.extend(predictions.cpu().numpy())
-            all_labels.extend([example["label"] for example in batch_examples])
-            
-            # 更新进度条
-            progress_bar.set_postfix({
-                "processed": f"{min(i + batch_size, len(eval_dataset))}/{len(eval_dataset)}"
-            })
+                # 编码输入
+                inputs = self.tokenizer(
+                    batch_prompts,
+                    padding=True,
+                    truncation=True,
+                    max_length=512,
+                    return_tensors="pt"
+                ).to(device)
+                
+                # 生成预测
+                with torch.no_grad():
+                    outputs = model(**inputs)
+                    logits = outputs["logits"]
+                    
+                    # 只在标签 token 中选择
+                    last_token_logits = logits[:, -1, :]  # [batch_size, vocab_size]
+                    label_logits = last_token_logits[:, label_token_ids]  # [batch_size, num_labels]
+                    predictions = label_logits.argmax(dim=-1)  # [batch_size]
+                
+                all_predictions.extend(predictions.cpu().numpy())
+                all_labels.extend([example["label"] for example in batch_examples])
+                
+                # 更新进度条
+                progress_bar.set_postfix({
+                    "processed": f"{min(i + batch_size, len(eval_dataset))}/{len(eval_dataset)}"
+                })
+                
+                # 定期清理缓存
+                if torch.cuda.is_available() and (i + 1) % (10 * batch_size) == 0:
+                    torch.cuda.empty_cache()
+        
+        finally:
+            # 确保测量最终内存使用
+            final_memory = self.measure_memory()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         
         # 计算指标
         metrics = self.metric.compute(
@@ -222,8 +238,8 @@ class BenchmarkGLUE(BenchmarkBase):
         # 添加性能指标
         metrics.update({
             "avg_inference_time": f"{(time.time() - start_time) / len(eval_dataset):.4f}s",
-            "gpu_memory_usage": f"{self.measure_memory():.2f}GB",
-            "cpu_memory_usage": f"{self.measure_cpu_memory():.2f}GB",
+            "peak_gpu_memory": f"{final_memory:.2f}GB",
+            "gpu_memory_increase": f"{(final_memory - initial_memory):.2f}GB",
             "num_shots": self.num_shots
         })
         

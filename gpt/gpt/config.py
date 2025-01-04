@@ -46,6 +46,7 @@ class WandBConfig:
 
 @dataclass
 class ExperimentConfig:
+    name: str
     model_config: ModelConfig
     training_config: TrainingConfig
     data_config: DataConfig
