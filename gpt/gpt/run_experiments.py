@@ -1,11 +1,12 @@
 import os
 import copy
+from gpt.config import Config
 import wandb
 import torch
 import torch.distributed as dist
 import numpy as np
 import random
-from gpt.env import Env
+from env import Env
 
 def setup_distributed(rank: int, world_size: int):
     """设置分布式训练环境"""

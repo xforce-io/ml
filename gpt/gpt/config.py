@@ -75,6 +75,7 @@ class Config:
         # 创建实验配置
         experiment_dict = config_dict.get('experiment', {})
         self.experiment_config = ExperimentConfig(
+            name=None,
             model_config=self.model_config,
             training_config=self.training_config,
             data_config=self.data_config,

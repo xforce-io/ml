@@ -146,6 +146,12 @@ class BenchmarkGLUE(BenchmarkBase):
         device = next(model.parameters()).device
         model.eval()
         
+        # 获取原始模型（如果是 DDP 模型）
+        if hasattr(model, 'module'):
+            base_model = model.module
+        else:
+            base_model = model
+        
         # 从训练集中随机选择 few-shot 样本
         train_dataset = self.dataset["train"]
         rng = np.random.default_rng(42)  # 固定随机种子
@@ -243,4 +249,5 @@ class BenchmarkGLUE(BenchmarkBase):
             "num_shots": self.num_shots
         })
         
-        self.log_metrics(f"{model.config.attention_type.upper()}", metrics) 
+        # 使用原始模型的配置
+        self.log_metrics(f"{base_model.config.attention_type.upper()}", metrics) 

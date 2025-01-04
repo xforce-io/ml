@@ -40,4 +40,4 @@ echo "- 主端口: $MASTER_PORT"
 python -m torch.distributed.launch \
     --nproc_per_node=$NUM_GPUS \
     --master_port=$MASTER_PORT \
-    gpt/run_experiments.py 
+    -m gpt.run_experiments
