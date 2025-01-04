@@ -1,3 +1,7 @@
+"""
+基于 Transformer 架构的 GPT 模型实现
+包含了多头注意力(MHA)、分组查询注意力(GQA)和多查询注意力(MQA)三种注意力机制
+"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -14,43 +18,62 @@ from datasets import load_dataset
 from tqdm import tqdm
 
 class AttentionBase(nn.Module):
+    """注意力机制的基类，实现了基础的头部分割功能"""
     def __init__(self, config: ModelConfig):
         super().__init__()
-        self.hidden_size = config.hidden_size
-        self.num_heads = config.num_heads
-        self.head_dim = config.hidden_size // config.num_heads
-        self.dropout = config.dropout
+        self.hidden_size = config.hidden_size  # 隐藏层维度
+        self.num_heads = config.num_heads      # 注意力头数
+        self.head_dim = config.hidden_size // config.num_heads  # 每个头的维度
+        self.dropout = config.dropout          # dropout 比率
 
     def _split_heads(self, x: torch.Tensor, num_heads: int) -> torch.Tensor:
+        """将输入张量分割成多个注意力头
+        Args:
+            x: 输入张量，形状为 [batch_size, seq_len, dim]
+            num_heads: 注意力头数量
+        Returns:
+            形状为 [batch_size, num_heads, seq_len, head_dim] 的张量
+        """
         batch_size, seq_len, dim = x.shape
         x = x.view(batch_size, seq_len, num_heads, dim // num_heads)
-        return x.permute(0, 2, 1, 3)  # (batch, heads, seq_len, head_dim)
+        return x.permute(0, 2, 1, 3)
 
 class MultiHeadAttention(AttentionBase):
+    """标准的多头注意力实现
+    每个头都有独立的 Q、K、V 投影矩阵，所有头的数量相同"""
     def __init__(self, config: ModelConfig):
         super().__init__(config)
+        # 为 Q、K、V 创建独立的线性投影层
         self.q_proj = nn.Linear(config.hidden_size, config.hidden_size)
         self.k_proj = nn.Linear(config.hidden_size, config.hidden_size)
         self.v_proj = nn.Linear(config.hidden_size, config.hidden_size)
         self.out_proj = nn.Linear(config.hidden_size, config.hidden_size)
         
     def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """前向传播
+        Args:
+            x: 输入张量，形状为 [batch_size, seq_len, hidden_size]
+            attention_mask: 注意力掩码，形状为 [batch_size, seq_len]
+        """
         batch_size, seq_len, _ = x.shape
         
-        q = self._split_heads(self.q_proj(x), self.num_heads)
-        k = self._split_heads(self.k_proj(x), self.num_heads)
-        v = self._split_heads(self.v_proj(x), self.num_heads)
+        # 生成 Q、K、V 并分割头部
+        q = self._split_heads(self.q_proj(x), self.num_heads)  # [B, num_heads, seq_len, head_dim]
+        k = self._split_heads(self.k_proj(x), self.num_heads)  # [B, num_heads, seq_len, head_dim]
+        v = self._split_heads(self.v_proj(x), self.num_heads)  # [B, num_heads, seq_len, head_dim]
         
-        # Scaled dot-product attention
+        # 计算注意力分数
         scores = torch.matmul(q, k.transpose(-2, -1)) / torch.sqrt(torch.tensor(self.head_dim))
+        
         if attention_mask is not None:
-            # 调整 attention_mask 的维度以匹配 scores
             attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, seq_len]
             scores = scores + attention_mask
-
+        
+        # 应用 softmax 和 dropout
         attn_weights = F.softmax(scores, dim=-1)
         attn_weights = F.dropout(attn_weights, p=self.dropout, training=self.training)
         
+        # 计算输出
         attn_output = torch.matmul(attn_weights, v)
         attn_output = attn_output.permute(0, 2, 1, 3).contiguous()
         attn_output = attn_output.view(batch_size, seq_len, self.hidden_size)
@@ -58,88 +81,122 @@ class MultiHeadAttention(AttentionBase):
         return self.out_proj(attn_output)
 
 class GroupedQueryAttention(AttentionBase):
+    """分组查询注意力实现的优化版本
+    将查询头分组，每组共享相同的键值对
+    优化点：
+    1. 减少广播操作
+    2. 优化张量重塑顺序
+    3. 确保关键操作的内存连续性
+    """
     def __init__(self, config: ModelConfig):
         super().__init__(config)
         assert config.num_kv_heads is not None
-        self.num_kv_heads = config.num_kv_heads
+        self.num_kv_heads = config.num_kv_heads  # KV头的数量
+        self.num_queries_per_kv = self.num_heads // self.num_kv_heads  # 每个 KV 头对应的查询头数量
+        
+        # Q 保持原有维度，K、V 维度减少
         self.q_proj = nn.Linear(config.hidden_size, config.hidden_size)
-        self.k_proj = nn.Linear(config.hidden_size, config.hidden_size * config.num_kv_heads // config.num_heads)
-        self.v_proj = nn.Linear(config.hidden_size, config.hidden_size * config.num_kv_heads // config.num_heads)
+        kv_size = config.hidden_size * config.num_kv_heads // config.num_heads
+        self.k_proj = nn.Linear(config.hidden_size, kv_size)
+        self.v_proj = nn.Linear(config.hidden_size, kv_size)
         self.out_proj = nn.Linear(config.hidden_size, config.hidden_size)
 
     def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """优化的前向传播
+        通过重新排列计算顺序和确保内存连续性来减少内存使用
+        """
         batch_size, seq_len, _ = x.shape
         
-        q = self._split_heads(self.q_proj(x), self.num_heads)  # [B, num_heads, seq_len, head_dim]
-        k = self._split_heads(self.k_proj(x), self.num_kv_heads)  # [B, num_kv_heads, seq_len, head_dim]
-        v = self._split_heads(self.v_proj(x), self.num_kv_heads)  # [B, num_kv_heads, seq_len, head_dim]
+        # 1. 首先计算 Q、K、V 投影，确保结果是连续的
+        q = self.q_proj(x).contiguous()
+        k = self.k_proj(x).contiguous()
+        v = self.v_proj(x).contiguous()
         
-        # 重塑 q 以匹配 k,v 的分组
-        # [B, num_heads, seq_len, head_dim] -> [B, num_kv_heads, num_heads_per_kv, seq_len, head_dim]
-        q = q.view(batch_size, self.num_kv_heads, self.num_heads // self.num_kv_heads, seq_len, self.head_dim)
+        # 2. 重塑 Q，直接调整为目标形状，避免多次 view 操作
+        # [batch_size, seq_len, hidden_size] -> [batch_size, num_kv_heads, num_queries_per_kv, seq_len, head_dim]
+        q = q.view(batch_size, seq_len, self.num_kv_heads, self.num_queries_per_kv, self.head_dim)
+        q = q.permute(0, 2, 3, 1, 4)
         
-        # 计算注意力分数，现在 k 无需复制
-        # [B, num_kv_heads, num_heads_per_kv, seq_len, seq_len]
-        scores = torch.matmul(q, k.unsqueeze(2).transpose(-2, -1)) / torch.sqrt(torch.tensor(self.head_dim))
+        # 3. 重塑 K 和 V，直接得到目标形状
+        # [batch_size, seq_len, kv_size] -> [batch_size, num_kv_heads, seq_len, head_dim]
+        k = k.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
+        v = v.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
+        k = k.permute(0, 2, 1, 3)
+        v = v.permute(0, 2, 1, 3)
         
+        # 4. 计算注意力分数，避免使用 unsqueeze 进行广播
+        # 使用 einsum 进行批量矩阵乘法，减少中间张量的创建
+        # [batch, num_kv_heads, num_queries_per_kv, seq_len, head_dim] @ [batch, num_kv_heads, seq_len, head_dim]
+        # -> [batch, num_kv_heads, num_queries_per_kv, seq_len, seq_len]
+        scores = torch.einsum('bhqsd,bhkd->bhqsk', q, k) / torch.sqrt(torch.tensor(self.head_dim))
+        
+        # 5. 处理注意力掩码
         if attention_mask is not None:
-            # 调整 attention_mask 的维度以匹配 scores
-            # scores shape: [B, num_kv_heads, num_heads_per_kv, seq_len, seq_len]
-            attention_mask = attention_mask.unsqueeze(1).unsqueeze(1).unsqueeze(1)  # [B, 1, 1, 1, seq_len]
+            # 直接扩展掩码到目标维度，避免多次 unsqueeze
+            attention_mask = attention_mask.view(batch_size, 1, 1, 1, seq_len)
             scores = scores + attention_mask
         
+        # 6. 应用 softmax 和 dropout
         attn_weights = F.softmax(scores, dim=-1)
         attn_weights = F.dropout(attn_weights, p=self.dropout, training=self.training)
         
-        # 计算输出，v 也无需复制
-        # [B, num_kv_heads, num_heads_per_kv, seq_len, head_dim]
-        attn_output = torch.matmul(attn_weights, v.unsqueeze(2))
+        # 7. 计算输出，使用 einsum 避免显式的维度扩展
+        # [batch, num_kv_heads, num_queries_per_kv, seq_len, seq_len] @ [batch, num_kv_heads, seq_len, head_dim]
+        # -> [batch, num_kv_heads, num_queries_per_kv, seq_len, head_dim]
+        attn_output = torch.einsum('bhqsk,bhkd->bhqsd', attn_weights, v)
         
-        # 重塑回原始维度
-        # [B, num_heads, seq_len, head_dim]
-        attn_output = attn_output.view(batch_size, self.num_heads, seq_len, self.head_dim)
-        
-        attn_output = attn_output.permute(0, 2, 1, 3).contiguous()
+        # 8. 重塑回原始维度，使用最少的 view/permute 操作
+        # [batch, num_kv_heads, num_queries_per_kv, seq_len, head_dim] -> [batch, seq_len, hidden_size]
+        attn_output = attn_output.permute(0, 3, 1, 2, 4).contiguous()
         attn_output = attn_output.view(batch_size, seq_len, self.hidden_size)
         
         return self.out_proj(attn_output)
 
 class TransformerBlock(nn.Module):
+    """Transformer 块，包含自注意力层和前馈神经网络"""
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.attention_type = config.attention_type
         
+        # 根据配置选择不同的注意力机制
         if config.attention_type == 'mha':
             self.attn = MultiHeadAttention(config)
         elif config.attention_type == 'gqa':
             self.attn = GroupedQueryAttention(config)
         elif config.attention_type == 'mqa':
+            # 多查询注意力是 GQA 的特例，其 KV 头数为 1
             config.num_kv_heads = 1
             self.attn = GroupedQueryAttention(config)
         
+        # 前馈神经网络
         self.mlp = nn.Sequential(
             nn.Linear(config.hidden_size, config.intermediate_size),
             nn.GELU(),
             nn.Linear(config.intermediate_size, config.hidden_size),
             nn.Dropout(config.dropout),
         )
+        # Layer Normalization 层
         self.ln1 = nn.LayerNorm(config.hidden_size)
         self.ln2 = nn.LayerNorm(config.hidden_size)
         
     def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        x = x + self.attn(self.ln1(x), attention_mask)
-        x = x + self.mlp(self.ln2(x))
+        """前向传播，包含残差连接"""
+        x = x + self.attn(self.ln1(x), attention_mask)  # 注意力层的残差连接
+        x = x + self.mlp(self.ln2(x))                   # MLP 层的残差连接
         return x
 
 class GPT(nn.Module):
+    """GPT 模型的主体实现"""
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
         
+        # 词嵌入和位置编码
         self.token_embeddings = nn.Embedding(config.vocab_size, config.hidden_size)
         self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
         self.dropout = nn.Dropout(config.dropout)
         
+        # Transformer 层
         self.blocks = nn.ModuleList([TransformerBlock(config) for _ in range(config.num_layers)])
         self.ln_f = nn.LayerNorm(config.hidden_size)
         self.head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
@@ -148,6 +205,9 @@ class GPT(nn.Module):
         self.apply(self._init_weights)
         
     def _init_weights(self, module):
+        """初始化模型权重
+        使用正态分布初始化线性层和嵌入层，LayerNorm 层使用 1 和 0 初始化
+        """
         if isinstance(module, nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if module.bias is not None:
@@ -160,14 +220,25 @@ class GPT(nn.Module):
             
     def forward(self, input_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None,
                 labels: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+        """模型前向传播
+        Args:
+            input_ids: 输入的词 id，形状为 [batch_size, seq_len]
+            attention_mask: 注意力掩码，形状为 [batch_size, seq_len]
+            labels: 目标词 id，用于计算损失，形状为 [batch_size, seq_len]
+        Returns:
+            包含 logits 和可选的 loss 的字典
+        """
         b, t = input_ids.size()
+        # 生成位置编码的索引
         pos = torch.arange(0, t, dtype=torch.long, device=input_ids.device).unsqueeze(0)
         
+        # 计算词嵌入和位置编码的和
         token_embeddings = self.token_embeddings(input_ids)
         position_embeddings = self.position_embeddings(pos)
         
         x = self.dropout(token_embeddings + position_embeddings)
         
+        # 通过所有 Transformer 层
         for block in self.blocks:
             x = block(x, attention_mask)
             
@@ -176,7 +247,7 @@ class GPT(nn.Module):
         
         outputs = {"logits": logits}
         if labels is not None:
-            # 计算损失
+            # 计算语言模型的损失：预测下一个词
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
             loss = F.cross_entropy(shift_logits.view(-1, shift_logits.size(-1)), 
@@ -186,7 +257,10 @@ class GPT(nn.Module):
         return outputs
     
     def save_pretrained(self, save_dir: str):
-        """保存模型和配置"""
+        """保存模型权重和配置到指定目录
+        Args:
+            save_dir: 保存目录的路径
+        """
         os.makedirs(save_dir, exist_ok=True)
         
         # 保存模型权重
@@ -202,7 +276,13 @@ class GPT(nn.Module):
     
     @classmethod
     def from_pretrained(cls, model_dir: str, device: str = None):
-        """从保存的目录加载模型"""
+        """从保存的目录加载预训练模型
+        Args:
+            model_dir: 模型目录路径
+            device: 设备类型（'cuda'/'cpu'/'mps'）
+        Returns:
+            加载好的模型实例
+        """
         # 检测设备
         if device is None:
             if torch.backends.mps.is_available():
@@ -217,10 +297,8 @@ class GPT(nn.Module):
             config_dict = json.load(f)
         config = ModelConfig(**config_dict)
         
-        # 初始化模型
+        # 初始化模型并加载权重
         model = cls(config)
-        
-        # 加载权重
         state_dict = torch.load(os.path.join(model_dir, "model.pt"), 
                             map_location=device)
         model.load_state_dict(state_dict)
@@ -228,7 +306,13 @@ class GPT(nn.Module):
         return model.to(device)
 
     def train_step(self, batch: Dict[str, torch.Tensor], optimizer: torch.optim.Optimizer) -> Dict[str, float]:
-        """单步训练"""
+        """执行单步训练
+        Args:
+            batch: 包含训练数据的字典
+            optimizer: 优化器实例
+        Returns:
+            包含训练指标的字典
+        """
         self.train()
         optimizer.zero_grad()
         
@@ -236,7 +320,7 @@ class GPT(nn.Module):
         loss = outputs["loss"]
         loss.backward()
         
-        # 记录梯度范数
+        # 梯度裁剪
         grad_norm = torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
         
         optimizer.step()
@@ -257,7 +341,12 @@ class GPT(nn.Module):
             }
     
     def evaluate(self, dataloader: torch.utils.data.DataLoader) -> Dict[str, float]:
-        """评估模型"""
+        """评估模型性能
+        Args:
+            dataloader: 评估数据的 DataLoader
+        Returns:
+            包含评估指标的字典
+        """
         self.eval()
         total_loss = 0
         total_samples = 0
@@ -296,9 +385,15 @@ class GPT(nn.Module):
                    optimizer: torch.optim.Optimizer,
                    epoch: int,
                    val_dataloader: Optional[torch.utils.data.DataLoader] = None) -> Dict[str, float]:
-        """训练一个 epoch"""
-        from tqdm import tqdm
-        
+        """训练一个完整的 epoch
+        Args:
+            train_dataloader: 训练数据的 DataLoader
+            optimizer: 优化器实例
+            epoch: 当前 epoch 编号
+            val_dataloader: 可选的验证数据 DataLoader
+        Returns:
+            包含训练和验证指标的字典
+        """
         epoch_start_time = time.time()
         
         running_loss = 0.0
