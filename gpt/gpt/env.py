@@ -247,7 +247,8 @@ class Env:
             benchmark.run_benchmark(model, batch_size=config.training_config.eval_batch_size)
         
         # 生成对比图表
-        benchmark.plot_results(
-            save_path=os.path.join(self.config.output_dir, "comparison.png")
-        )
-        benchmark.print_results_as_markdown()
+        if self.local_rank in [-1, 0]:
+            benchmark.plot_results(
+                save_path=os.path.join(self.config.output_dir, "comparison.png")
+            )
+            benchmark.print_results_as_markdown()
