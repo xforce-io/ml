@@ -46,14 +46,16 @@ class BenchmarkBase:
         metrics_data = {
             "Inference Time (s)": [],
             "GPU Memory (GB)": [],
-            "Model Type": []
+            "Model Type": [],
+            "Accuracy": []
         }
         
         for model_type, metrics in self.results.items():
             metrics_data["Inference Time (s)"].append(float(metrics["avg_inference_time"][:-1]))
             metrics_data["GPU Memory (GB)"].append(float(metrics["peak_gpu_memory"][:-2]))
             metrics_data["Model Type"].append(model_type)
-        
+            metrics_data["Accuracy"].append(float(metrics["accuracy"]))
+
         # 创建子图
         fig, axes = plt.subplots(1, 2, figsize=(12, 5))
         

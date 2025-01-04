@@ -70,23 +70,33 @@ class GroupedQueryAttention(AttentionBase):
     def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         batch_size, seq_len, _ = x.shape
         
-        q = self._split_heads(self.q_proj(x), self.num_heads)
-        k = self._split_heads(self.k_proj(x), self.num_kv_heads)
-        v = self._split_heads(self.v_proj(x), self.num_kv_heads)
+        q = self._split_heads(self.q_proj(x), self.num_heads)  # [B, num_heads, seq_len, head_dim]
+        k = self._split_heads(self.k_proj(x), self.num_kv_heads)  # [B, num_kv_heads, seq_len, head_dim]
+        v = self._split_heads(self.v_proj(x), self.num_kv_heads)  # [B, num_kv_heads, seq_len, head_dim]
         
-        # 复制 k,v 以匹配查询头数
-        k = k.repeat_interleave(self.num_heads // self.num_kv_heads, dim=1)
-        v = v.repeat_interleave(self.num_heads // self.num_kv_heads, dim=1)
+        # 重塑 q 以匹配 k,v 的分组
+        # [B, num_heads, seq_len, head_dim] -> [B, num_kv_heads, num_heads_per_kv, seq_len, head_dim]
+        q = q.view(batch_size, self.num_kv_heads, self.num_heads // self.num_kv_heads, seq_len, self.head_dim)
         
-        scores = torch.matmul(q, k.transpose(-2, -1)) / torch.sqrt(torch.tensor(self.head_dim))
+        # 计算注意力分数，现在 k 无需复制
+        # [B, num_kv_heads, num_heads_per_kv, seq_len, seq_len]
+        scores = torch.matmul(q, k.unsqueeze(2).transpose(-2, -1)) / torch.sqrt(torch.tensor(self.head_dim))
+        
         if attention_mask is not None:
             attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
             scores = scores + attention_mask
-
+        
         attn_weights = F.softmax(scores, dim=-1)
         attn_weights = F.dropout(attn_weights, p=self.dropout, training=self.training)
         
-        attn_output = torch.matmul(attn_weights, v)
+        # 计算输出，v 也无需复制
+        # [B, num_kv_heads, num_heads_per_kv, seq_len, head_dim]
+        attn_output = torch.matmul(attn_weights, v.unsqueeze(2))
+        
+        # 重塑回原始维度
+        # [B, num_heads, seq_len, head_dim]
+        attn_output = attn_output.view(batch_size, self.num_heads, seq_len, self.head_dim)
+        
         attn_output = attn_output.permute(0, 2, 1, 3).contiguous()
         attn_output = attn_output.view(batch_size, seq_len, self.hidden_size)
         
