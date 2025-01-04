@@ -46,21 +46,19 @@ class BenchmarkBase:
         metrics_data = {
             "Inference Time (s)": [],
             "GPU Memory (GB)": [],
-            "CPU Memory (GB)": [],
             "Model Type": []
         }
         
         for model_type, metrics in self.results.items():
             metrics_data["Inference Time (s)"].append(float(metrics["avg_inference_time"][:-1]))
-            metrics_data["GPU Memory (GB)"].append(float(metrics["gpu_memory_usage"][:-2]))
-            metrics_data["CPU Memory (GB)"].append(float(metrics["cpu_memory_usage"][:-2]))
+            metrics_data["GPU Memory (GB)"].append(float(metrics["peak_gpu_memory"][:-2]))
             metrics_data["Model Type"].append(model_type)
         
         # 创建子图
-        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
         
         # 绘制柱状图
-        for i, metric in enumerate(["Inference Time (s)", "GPU Memory (GB)", "CPU Memory (GB)"]):
+        for i, metric in enumerate(["Inference Time (s)", "GPU Memory (GB)"]):
             sns.barplot(x="Model Type", y=metric, data=metrics_data, ax=axes[i])
             axes[i].set_title(metric)
         
