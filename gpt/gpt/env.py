@@ -250,3 +250,4 @@ class Env:
         benchmark.plot_results(
             save_path=os.path.join(self.config.output_dir, "comparison.png")
         )
+        benchmark.print_results_as_markdown()
