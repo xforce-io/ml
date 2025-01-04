@@ -64,18 +64,36 @@ def main():
     mha_config.name = "mha"
     configs.append(mha_config)
     
-    # GQA 配置
+    # GQA-12-4 配置
     gqa_config = copy.deepcopy(config.experiment_config)
     gqa_config.model_config.attention_type = "gqa"
-    gqa_config.model_config.num_kv_heads = 4
-    gqa_config.name = "gqa"
+    gqa_config.model_config.num_kv_heads = 12
+    gqa_config.model_config.inference_num_kv_heads = 4
+    gqa_config.name = "gqa-12-4"
     configs.append(gqa_config)
     
-    # MQA 配置
+    # GQA-8-4 配置
+    gqa_config = copy.deepcopy(config.experiment_config)
+    gqa_config.model_config.attention_type = "gqa"
+    gqa_config.model_config.num_kv_heads = 8
+    gqa_config.model_config.inference_num_kv_heads = 4
+    gqa_config.name = "gqa-8-4"
+    configs.append(gqa_config)
+ 
+    # MQA-12-1 配置
     mqa_config = copy.deepcopy(config.experiment_config)
     mqa_config.model_config.attention_type = "mqa"
-    mqa_config.model_config.num_kv_heads = 1
-    mqa_config.name = "mqa"
+    mqa_config.model_config.num_kv_heads = 12
+    mqa_config.model_config.inference_num_kv_heads = 1
+    mqa_config.name = "mqa-12-1"
+    configs.append(mqa_config)
+    
+    # MQA-8-1 配置
+    mqa_config = copy.deepcopy(config.experiment_config)
+    mqa_config.model_config.attention_type = "mqa"
+    mqa_config.model_config.num_kv_heads = 8
+    mqa_config.model_config.inference_num_kv_heads = 1
+    mqa_config.name = "mqa-8-1"
     configs.append(mqa_config)
     
     # 运行实验

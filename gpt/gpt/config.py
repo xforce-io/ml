@@ -18,6 +18,7 @@ class ModelConfig:
     dropout: float = 0.1
     attention_type: str = "mha"
     num_kv_heads: Optional[int] = None  # 用于 GQA/MQA
+    inference_num_kv_heads: Optional[int] = None  # 推理时的 KV heads 数量，用于 GQA/MQA
 
 @dataclass
 class TrainingConfig:

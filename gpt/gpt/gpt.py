@@ -5,16 +5,12 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from dataclasses import dataclass
 from typing import Optional, Dict
 import time
-import psutil
 import numpy as np
-from torch.cuda import max_memory_allocated, reset_peak_memory_stats
 from gpt.config import ModelConfig
 import os
 import json
-from datasets import load_dataset
 from tqdm import tqdm
 
 class AttentionBase(nn.Module):
@@ -87,11 +83,13 @@ class GroupedQueryAttention(AttentionBase):
     1. 减少广播操作
     2. 优化张量重塑顺序
     3. 确保关键操作的内存连续性
+    4. 支持训练和推理时使用不同的 KV heads 数量
     """
     def __init__(self, config: ModelConfig):
         super().__init__(config)
         assert config.num_kv_heads is not None
-        self.num_kv_heads = config.num_kv_heads  # KV头的数量
+        self.num_kv_heads = config.num_kv_heads  # 训练时的 KV 头数量
+        self.inference_num_kv_heads = config.inference_num_kv_heads or config.num_kv_heads  # 推理时的 KV 头数量
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads  # 每个 KV 头对应的查询头数量
         
         # Q 保持原有维度，K、V 维度减少
@@ -100,10 +98,17 @@ class GroupedQueryAttention(AttentionBase):
         self.k_proj = nn.Linear(config.hidden_size, kv_size)
         self.v_proj = nn.Linear(config.hidden_size, kv_size)
         self.out_proj = nn.Linear(config.hidden_size, config.hidden_size)
+        
+        # 用于推理时重塑 K、V 的投影矩阵
+        if self.inference_num_kv_heads != self.num_kv_heads:
+            inference_kv_size = config.hidden_size * self.inference_num_kv_heads // config.num_heads
+            self.inference_k_proj = nn.Linear(kv_size, inference_kv_size)
+            self.inference_v_proj = nn.Linear(kv_size, inference_kv_size)
 
     def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """优化的前向传播
         通过重新排列计算顺序和确保内存连续性来减少内存使用
+        在推理时可以使用不同的 KV heads 数量
         """
         batch_size, seq_len, _ = x.shape
         
@@ -112,27 +117,31 @@ class GroupedQueryAttention(AttentionBase):
         k = self.k_proj(x).contiguous()
         v = self.v_proj(x).contiguous()
         
+        # 如果是推理模式且 KV heads 数量不同，则重新投影 K、V
+        if not self.training and self.inference_num_kv_heads != self.num_kv_heads:
+            k = self.inference_k_proj(k).contiguous()
+            v = self.inference_v_proj(v).contiguous()
+            current_num_kv_heads = self.inference_num_kv_heads
+            current_queries_per_kv = self.num_heads // self.inference_num_kv_heads
+        else:
+            current_num_kv_heads = self.num_kv_heads
+            current_queries_per_kv = self.num_queries_per_kv
+        
         # 2. 重塑 Q，直接调整为目标形状，避免多次 view 操作
-        # [batch_size, seq_len, hidden_size] -> [batch_size, num_kv_heads, num_queries_per_kv, seq_len, head_dim]
-        q = q.view(batch_size, seq_len, self.num_kv_heads, self.num_queries_per_kv, self.head_dim)
+        q = q.view(batch_size, seq_len, current_num_kv_heads, current_queries_per_kv, self.head_dim)
         q = q.permute(0, 2, 3, 1, 4)
         
         # 3. 重塑 K 和 V，直接得到目标形状
-        # [batch_size, seq_len, kv_size] -> [batch_size, num_kv_heads, seq_len, head_dim]
-        k = k.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
-        v = v.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
+        k = k.view(batch_size, seq_len, current_num_kv_heads, self.head_dim)
+        v = v.view(batch_size, seq_len, current_num_kv_heads, self.head_dim)
         k = k.permute(0, 2, 1, 3)
         v = v.permute(0, 2, 1, 3)
         
-        # 4. 计算注意力分数，避免使用 unsqueeze 进行广播
-        # 使用 einsum 进行批量矩阵乘法，减少中间张量的创建
-        # [batch, num_kv_heads, num_queries_per_kv, seq_len, head_dim] @ [batch, num_kv_heads, seq_len, head_dim]
-        # -> [batch, num_kv_heads, num_queries_per_kv, seq_len, seq_len]
+        # 4. 计算注意力分数
         scores = torch.einsum('bhqsd,bhkd->bhqsk', q, k) / torch.sqrt(torch.tensor(self.head_dim))
         
         # 5. 处理注意力掩码
         if attention_mask is not None:
-            # 直接扩展掩码到目标维度，避免多次 unsqueeze
             attention_mask = attention_mask.view(batch_size, 1, 1, 1, seq_len)
             scores = scores + attention_mask
         
@@ -140,13 +149,10 @@ class GroupedQueryAttention(AttentionBase):
         attn_weights = F.softmax(scores, dim=-1)
         attn_weights = F.dropout(attn_weights, p=self.dropout, training=self.training)
         
-        # 7. 计算输出，使用 einsum 避免显式的维度扩展
-        # [batch, num_kv_heads, num_queries_per_kv, seq_len, seq_len] @ [batch, num_kv_heads, seq_len, head_dim]
-        # -> [batch, num_kv_heads, num_queries_per_kv, seq_len, head_dim]
+        # 7. 计算输出
         attn_output = torch.einsum('bhqsk,bhkd->bhqsd', attn_weights, v)
         
-        # 8. 重塑回原始维度，使用最少的 view/permute 操作
-        # [batch, num_kv_heads, num_queries_per_kv, seq_len, head_dim] -> [batch, seq_len, hidden_size]
+        # 8. 重塑回原始维度
         attn_output = attn_output.permute(0, 3, 1, 2, 4).contiguous()
         attn_output = attn_output.view(batch_size, seq_len, self.hidden_size)
         
