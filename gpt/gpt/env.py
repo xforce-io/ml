@@ -235,14 +235,11 @@ class Env:
     
     def run_experiments(self, configs: List[ExperimentConfig]):
         """运行多个实验并比较结果"""
-
-        print(f"Running experiments[{self.config.name}] on {self.local_rank} with {self.world_size} GPUs")
-
         benchmark = BenchmarkGLUE(task_name=self.config.task_name)
         models = []
-        
         for config in configs:
             self.config = config
+            print(f"Running experiments[{self.config.name}] on {self.local_rank} with {self.world_size} GPUs")
             model = self.train_model()
             models.append(model)
             benchmark.run_benchmark(model, batch_size=config.training_config.eval_batch_size)
