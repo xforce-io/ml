@@ -169,7 +169,7 @@ class Env:
         
         # 优化器和学习率调度器
         optimizer = torch.optim.AdamW(
-            model.parameters(), 
+            model.parameters(),
             lr=self.config.training_config.learning_rate
         )
         num_training_steps = len(train_dataloader) * self.config.training_config.num_epochs
@@ -194,7 +194,8 @@ class Env:
                 train_sampler.set_epoch(epoch)
             
             # 使用 GPT 类的 train_epoch 方法
-            metrics = model.train_epoch(
+            base_model = model.module if isinstance(model, DDP) else model
+            metrics = base_model.train_epoch(
                 train_dataloader=train_dataloader,
                 optimizer=optimizer,
                 epoch=epoch,
