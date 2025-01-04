@@ -1,5 +1,6 @@
 import os
 import copy
+from gpt.config import Config
 import wandb
 import torch
 import torch.distributed as dist

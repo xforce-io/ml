@@ -31,16 +31,15 @@ data:
   max_length: 512
   block_size: 128
   stride: 64
-  train_subset_ratio: 0.2  # 使用 20% 的训练数据
+  train_subset_ratio: 1.0
+
+wandb:
+  enabled: false
+  project: "gpt-attention-comparison"
+  name: null
 
 # 实验配置
 experiment:
   output_dir: "outputs"
   seed: 42
-  task_name: "mrpc"  # 用于 GLUE benchmark 评估
-
-# Weights & Biases 配置
-wandb:
-  enabled: false  # 是否启用 wandb
-  project: "gpt-attention-comparison"  # 项目名称
-  name: null  # 实验名称，null 则自动生成 
+  task_name: "mrpc"  # 用于 GLUE benchmark 评估 
