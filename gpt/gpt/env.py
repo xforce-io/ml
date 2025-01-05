@@ -242,7 +242,10 @@ class Env:
             print(f"Running experiments[{self.config.name}] on {self.local_rank} with {self.world_size} GPUs")
             model = self.train_model()
             models.append(model)
-            benchmark.run_benchmark(model, batch_size=config.training_config.eval_batch_size)
+            benchmark.run_benchmark(
+                experiment_name=self.config.name,
+                model=model, 
+                batch_size=config.training_config.eval_batch_size)
         
         # 生成对比图表
         if self.local_rank in [-1, 0]:
