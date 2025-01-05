@@ -107,56 +107,70 @@ class GroupedQueryAttention(AttentionBase):
 
     def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """优化的前向传播
-        通过重新排列计算顺序和确保内存连续性来减少内存使用
-        在推理时可以使用不同的 KV heads 数量
+        Args:
+            x: [batch_size, seq_len, hidden_size]
+            attention_mask: [batch_size, seq_len]
+        Returns:
+            [batch_size, seq_len, hidden_size]
         """
         batch_size, seq_len, _ = x.shape
         
         # 1. 首先计算 Q、K、V 投影，确保结果是连续的
-        q = self.q_proj(x).contiguous()
-        k = self.k_proj(x).contiguous()
-        v = self.v_proj(x).contiguous()
+        q = self.q_proj(x).contiguous()  # [B, S, H]
+        k = self.k_proj(x).contiguous()  # [B, S, kv_size]  其中 kv_size = H * num_kv_heads / num_heads
+        v = self.v_proj(x).contiguous()  # [B, S, kv_size]
         
         # 如果是推理模式且 KV heads 数量不同，则重新投影 K、V
         if not self.training and self.inference_num_kv_heads != self.num_kv_heads:
-            k = self.inference_k_proj(k).contiguous()
-            v = self.inference_v_proj(v).contiguous()
+            k = self.inference_k_proj(k).contiguous()  # [B, S, inference_kv_size]
+            v = self.inference_v_proj(v).contiguous()  # [B, S, inference_kv_size]
             current_num_kv_heads = self.inference_num_kv_heads
             current_queries_per_kv = self.num_heads // self.inference_num_kv_heads
         else:
             current_num_kv_heads = self.num_kv_heads
             current_queries_per_kv = self.num_queries_per_kv
         
-        # 2. 重塑 Q，直接调整为目标形状，避免多次 view 操作
-        q = q.view(batch_size, seq_len, current_num_kv_heads, current_queries_per_kv, self.head_dim)
-        q = q.permute(0, 2, 3, 1, 4)
+        # 2. 重塑 Q
+        # 首先分成 num_heads 个头
+        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)  # [B, S, H/D, D]
+        # 然后重组为 KV 分组形式
+        q = q.view(batch_size, seq_len, current_num_kv_heads, current_queries_per_kv, self.head_dim)  # [B, S, KV_H, Q_per_KV, D]
+        q = q.permute(0, 2, 3, 1, 4)  # [B, KV_H, Q_per_KV, S, D]
         
-        # 3. 重塑 K 和 V，直接得到目标形状
+        # 3. 重塑 K 和 V
+        # [B, S, kv_size] -> [B, S, num_kv_heads, head_dim]
         k = k.view(batch_size, seq_len, current_num_kv_heads, self.head_dim)
         v = v.view(batch_size, seq_len, current_num_kv_heads, self.head_dim)
-        k = k.permute(0, 2, 1, 3)
-        v = v.permute(0, 2, 1, 3)
+        k = k.permute(0, 2, 1, 3)  # [B, num_kv_heads, S, head_dim]
+        v = v.permute(0, 2, 1, 3)  # [B, num_kv_heads, S, head_dim]
         
         # 4. 计算注意力分数
+        # [B, num_kv_heads, queries_per_kv, S, head_dim] @ [B, num_kv_heads, head_dim, S] 
+        # -> [B, num_kv_heads, queries_per_kv, S, S]
         scores = torch.einsum('bhqsd,bhkd->bhqsk', q, k) / torch.sqrt(torch.tensor(self.head_dim))
         
         # 5. 处理注意力掩码
         if attention_mask is not None:
+            # [B, S] -> [B, 1, 1, 1, S]
             attention_mask = attention_mask.view(batch_size, 1, 1, 1, seq_len)
             scores = scores + attention_mask
         
         # 6. 应用 softmax 和 dropout
-        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = F.softmax(scores, dim=-1)  # [B, num_kv_heads, queries_per_kv, S, S]
         attn_weights = F.dropout(attn_weights, p=self.dropout, training=self.training)
         
         # 7. 计算输出
+        # [B, num_kv_heads, queries_per_kv, S, S] @ [B, num_kv_heads, S, head_dim]
+        # -> [B, num_kv_heads, queries_per_kv, S, head_dim]
         attn_output = torch.einsum('bhqsk,bhkd->bhqsd', attn_weights, v)
         
         # 8. 重塑回原始维度
+        # [B, num_kv_heads, queries_per_kv, S, head_dim] -> [B, S, num_kv_heads, queries_per_kv, head_dim]
         attn_output = attn_output.permute(0, 3, 1, 2, 4).contiguous()
+        # [B, S, num_kv_heads * queries_per_kv * head_dim] = [B, S, H]
         attn_output = attn_output.view(batch_size, seq_len, self.hidden_size)
         
-        return self.out_proj(attn_output)
+        return self.out_proj(attn_output)  # [B, S, H]
 
 class TransformerBlock(nn.Module):
     """Transformer 块，包含自注意力层和前馈神经网络"""
