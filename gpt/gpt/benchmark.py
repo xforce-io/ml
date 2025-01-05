@@ -149,7 +149,11 @@ class BenchmarkGLUE(BenchmarkBase):
         
         return prompt
 
-    def run_benchmark(self, model, batch_size: int = 32):
+    def run_benchmark(
+            self, 
+            experiment_name: str,
+            model, 
+            batch_size: int = 32):
         device = next(model.parameters()).device
         model.eval()
         
@@ -257,4 +261,4 @@ class BenchmarkGLUE(BenchmarkBase):
         })
         
         # 使用原始模型的配置
-        self.log_metrics(f"{base_model.config.attention_type.upper()}", metrics) 
+        self.log_metrics(f"{experiment_name}", metrics) 
