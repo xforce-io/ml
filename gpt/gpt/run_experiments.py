@@ -75,7 +75,7 @@ def main():
     # GQA-8-4 配置
     gqa_config = copy.deepcopy(config.experiment_config)
     gqa_config.model_config.attention_type = "gqa"
-    gqa_config.model_config.num_kv_heads = 8
+    gqa_config.model_config.num_kv_heads = 4
     gqa_config.model_config.inference_num_kv_heads = 4
     gqa_config.name = "gqa-8-4"
     configs.append(gqa_config)
@@ -91,7 +91,7 @@ def main():
     # MQA-8-1 配置
     mqa_config = copy.deepcopy(config.experiment_config)
     mqa_config.model_config.attention_type = "mqa"
-    mqa_config.model_config.num_kv_heads = 8
+    mqa_config.model_config.num_kv_heads = 4
     mqa_config.model_config.inference_num_kv_heads = 1
     mqa_config.name = "mqa-8-1"
     configs.append(mqa_config)
