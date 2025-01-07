@@ -41,6 +41,7 @@ class ModelCacheManager:
                 "num_heads": model_config.num_heads,
                 "attention_type": model_config.attention_type,
                 "num_kv_heads": model_config.num_kv_heads,
+                "inference_num_kv_heads" : model_config.inference_num_kv_heads,
             },
             # 训练参数
             "training": {
