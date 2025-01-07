@@ -125,27 +125,51 @@ class BenchmarkGLUE(BenchmarkBase):
         """准备 few-shot prompt
         
         将训练集中的示例和测试样本组合成 prompt
+        支持的任务：
+        - mrpc: 句子对等价性判断 (0/1)
+        - sst2: 情感分析 (0:负面/1:正面)
+        - cola: 语法可接受性判断 (0:不可接受/1:可接受)
         """
-        prompt = "Determine if the following sentence pairs are equivalent (1) or not equivalent (0).\n\n"
-        
-        # 添加示例
-        for i, example in enumerate(examples):
-            if self.task_name == "mrpc":
-                prompt += f"Sentence 1: {example['sentence1']}\n"
-                prompt += f"Sentence 2: {example['sentence2']}\n"
-                prompt += f"Label: {example['label']}\n\n"
-            else:
-                prompt += f"Text: {example['sentence']}\n"
-                prompt += f"Label: {example['label']}\n\n"
-        
-        # 添加测试样本
         if self.task_name == "mrpc":
-            prompt += f"Sentence 1: {test_example['sentence1']}\n"
-            prompt += f"Sentence 2: {test_example['sentence2']}\n"
-            prompt += "Label:"
+            prompt = "判断以下句子对是否等价。如果等价输出1，不等价输出0。\n\n"
+            
+            # 添加示例
+            for example in examples:
+                prompt += f"句子1：{example['sentence1']}\n"
+                prompt += f"句子2：{example['sentence2']}\n"
+                prompt += f"答案：{example['label']}\n\n"
+            
+            # 添加测试样本
+            prompt += f"句子1：{test_example['sentence1']}\n"
+            prompt += f"句子2：{test_example['sentence2']}\n"
+            prompt += "答案："
+            
+        elif self.task_name == "sst2":
+            prompt = "判断以下电影评论的情感倾向。如果是正面情感输出1，负面情感输出0。\n\n"
+            
+            # 添加示例
+            for example in examples:
+                prompt += f"评论：{example['sentence']}\n"
+                prompt += f"情感：{example['label']}\n\n"
+            
+            # 添加测试样本
+            prompt += f"评论：{test_example['sentence']}\n"
+            prompt += "情感："
+            
+        elif self.task_name == "cola":
+            prompt = "判断以下句子在语法上是否正确。如果语法正确输出1，语法错误输出0。\n\n"
+            
+            # 添加示例
+            for example in examples:
+                prompt += f"句子：{example['sentence']}\n"
+                prompt += f"语法：{example['label']}\n\n"
+            
+            # 添加测试样本
+            prompt += f"句子：{test_example['sentence']}\n"
+            prompt += "语法："
+            
         else:
-            prompt += f"Text: {test_example['sentence']}\n"
-            prompt += "Label:"
+            raise ValueError(f"不支持的任务类型：{self.task_name}")
         
         return prompt
 
