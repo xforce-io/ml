@@ -184,8 +184,6 @@ class TransformerBlock(nn.Module):
         elif config.attention_type == 'gqa':
             self.attn = GroupedQueryAttention(config)
         elif config.attention_type == 'mqa':
-            # 多查询注意力是 GQA 的特例，其 KV 头数为 1
-            config.num_kv_heads = 1
             self.attn = GroupedQueryAttention(config)
         
         # 前馈神经网络
