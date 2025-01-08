@@ -260,10 +260,6 @@ class BenchmarkGLUE(BenchmarkBase):
                     "processed": f"{min(i + batch_size, len(eval_dataset))}/{len(eval_dataset)}"
                 })
                 
-                # 定期清理缓存
-                if torch.cuda.is_available() and (i + 1) % (10 * batch_size) == 0:
-                    torch.cuda.empty_cache()
-        
         finally:
             # 确保测量最终内存使用
             final_memory = self.measure_memory()
