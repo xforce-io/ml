@@ -2,8 +2,8 @@
 
 # 默认配置
 NUM_GPUS=1  # 默认使用4个GPU
-MASTER_PORT=29500  # 默认端口号
-GPU_INDICES="0"  # 默认使用的GPU索引
+MASTER_PORT=29501  # 默认端口号
+GPU_INDICES="7"  # 默认使用的GPU索引
 
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do

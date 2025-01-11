@@ -297,7 +297,7 @@ class BenchmarkGLUE(BenchmarkBase):
                         return_tensors="pt"
                     ).to(device)
                     
-                    outputs = model.generate(
+                    outputs = base_model.generate(
                         **inputs,
                         max_new_tokens=len(suffix_inputs["input_ids"][0]) + 1,
                         pad_token_id=self.tokenizer.pad_token_id,
