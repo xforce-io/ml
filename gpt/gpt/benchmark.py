@@ -220,7 +220,7 @@ class BenchmarkGLUE(BenchmarkBase):
             except ValueError:
                 print(f"Failed to parse label: {label_text}")
         else:
-            print(f"Prompt suffix '{prompt_suffix}' not found in output")
+            print(f"Prompt suffix '{prompt_suffix}' not found in output[{output_text}]")
         
         # 随机返回标签而不是总是返回0
         return random.choice([0, 1])
