@@ -209,8 +209,7 @@ class BenchmarkGLUE(BenchmarkBase):
         if prompt_suffix in output_text:
             label_text = output_text.split(prompt_suffix)[-1].strip()
             # 添加日志以便调试
-            print(f"Raw output: {output_text}")
-            print(f"Extracted label text: {label_text}")
+            print(f"Raw output: {output_text} label_text: {label_text}")
             try:
                 label = int(label_text)
                 if label in [0, 1]:
@@ -221,9 +220,7 @@ class BenchmarkGLUE(BenchmarkBase):
                 print(f"Failed to parse label: {label_text}")
         else:
             print(f"Prompt suffix '{prompt_suffix}' not found in output[{output_text}]")
-        
-        # 随机返回标签而不是总是返回0
-        return random.choice([0, 1])
+        return 0
 
     def run_benchmark(
             self, 
