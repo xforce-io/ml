@@ -90,9 +90,9 @@ class BenchmarkBase:
 class BenchmarkGLUE(BenchmarkBase):
     """GLUE 基准测试的实现"""
     SUPPORTED_TASKS = {
-        "mrpc": {"description": "句子对等价性判断", "suffix": "答案："},
-        "sst2": {"description": "情感分析", "suffix": "情感："},
-        "cola": {"description": "语法可接受性判断", "suffix": "语法："}
+        "mrpc": {"description": "Determine if sentence pairs are equivalent", "suffix": "Answer: "},
+        "sst2": {"description": "Sentiment analysis", "suffix": "Sentiment: "},
+        "cola": {"description": "Grammatical acceptability", "suffix": "Grammar: "}
     }
     
     def __init__(self, task_name: str = "mrpc", num_shots: int = 8):
@@ -153,54 +153,54 @@ class BenchmarkGLUE(BenchmarkBase):
         print(f"加载评估指标耗时：{t2 - t1:.2f}秒")
 
     def _prepare_few_shot_prompt(self, examples: List[Dict[str, Any]], test_example: Dict[str, Any]) -> str:
-        """准备 few-shot prompt
+        """Prepare few-shot prompt
         
         Args:
-            examples: few-shot 示例列表
-            test_example: 待测试的样本
+            examples: List of few-shot examples
+            test_example: Test example to evaluate
             
         Returns:
-            格式化的 prompt 字符串
+            Formatted prompt string
         """
         task_info = self.SUPPORTED_TASKS[self.task_name]
         
         if self.task_name == "mrpc":
-            prompt = f"判断以下句子对是否等价。如果等价输出1，不等价输出0。\n\n"
+            prompt = f"Determine if the following sentence pairs are equivalent. Output 1 if equivalent, 0 if not equivalent.\n\n"
             
-            # 添加示例
+            # Add examples
             for example in examples:
-                prompt += f"句子1：{example['sentence1']}\n"
-                prompt += f"句子2：{example['sentence2']}\n"
-                prompt += f"答案：{example['label']}\n\n"
+                prompt += f"Sentence 1: {example['sentence1']}\n"
+                prompt += f"Sentence 2: {example['sentence2']}\n"
+                prompt += f"Answer: {example['label']}\n\n"
             
-            # 添加测试样本
-            prompt += f"句子1：{test_example['sentence1']}\n"
-            prompt += f"句子2：{test_example['sentence2']}\n"
-            prompt += "答案："
+            # Add test example
+            prompt += f"Sentence 1: {test_example['sentence1']}\n"
+            prompt += f"Sentence 2: {test_example['sentence2']}\n"
+            prompt += "Answer:"
             
         elif self.task_name == "sst2":
-            prompt = f"判断以下电影评论的情感倾向。如果是正面情感输出1，负面情感输出0。\n\n"
+            prompt = f"Analyze the sentiment of the following movie reviews. Output 1 for positive sentiment, 0 for negative sentiment.\n\n"
             
-            # 添加示例
+            # Add examples
             for example in examples:
-                prompt += f"评论：{example['sentence']}\n"
-                prompt += f"情感：{example['label']}\n\n"
+                prompt += f"Review: {example['sentence']}\n"
+                prompt += f"Sentiment: {example['label']}\n\n"
             
-            # 添加测试样本
-            prompt += f"评论：{test_example['sentence']}\n"
-            prompt += "情感："
+            # Add test example
+            prompt += f"Review: {test_example['sentence']}\n"
+            prompt += "Sentiment:"
             
         elif self.task_name == "cola":
-            prompt = f"判断以下句子在语法上是否正确。如果语法正确输出1，语法错误输出0。\n\n"
+            prompt = f"Determine if the following sentences are grammatically correct. Output 1 if correct, 0 if incorrect.\n\n"
             
-            # 添加示例
+            # Add examples
             for example in examples:
-                prompt += f"句子：{example['sentence']}\n"
-                prompt += f"语法：{example['label']}\n\n"
+                prompt += f"Sentence: {example['sentence']}\n"
+                prompt += f"Grammar: {example['label']}\n\n"
             
-            # 添加测试样本
-            prompt += f"句子：{test_example['sentence']}\n"
-            prompt += "语法："
+            # Add test example
+            prompt += f"Sentence: {test_example['sentence']}\n"
+            prompt += "Grammar:"
             
         return prompt
 
@@ -220,7 +220,7 @@ class BenchmarkGLUE(BenchmarkBase):
             except ValueError:
                 print(f"Failed to parse label: {label_text}")
         else:
-            print(f"Prompt suffix '{prompt_suffix}' not found in output")
+            print(f"Prompt suffix '{prompt_suffix}' not found in output[{output_text}]")
         
         # 随机返回标签而不是总是返回0
         return random.choice([0, 1])
