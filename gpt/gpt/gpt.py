@@ -62,6 +62,9 @@ class MultiHeadAttention(AttentionBase):
         scores = torch.matmul(q, k.transpose(-2, -1)) / torch.sqrt(torch.tensor(self.head_dim))
         
         if attention_mask is not None:
+            # 确保只使用与当前序列长度匹配的掩码部分
+            current_seq_len = scores.size(-1)
+            attention_mask = attention_mask[..., :current_seq_len]
             attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, seq_len]
             scores = scores + attention_mask
         
