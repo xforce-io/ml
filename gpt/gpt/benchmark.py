@@ -218,8 +218,6 @@ class BenchmarkGLUE(BenchmarkBase):
                     print(f"Invalid label value: {label}")
             except ValueError:
                 print(f"Failed to parse label: {label_text}")
-        else:
-            print(f"Prompt suffix '{prompt_suffix}' not found in output[{output_text}]")
         return 0
 
     def run_benchmark(
