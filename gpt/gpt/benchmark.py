@@ -14,6 +14,7 @@ import evaluate
 import glob
 from tqdm import tqdm
 import torch.nn as nn
+import random
 
 class BenchmarkBase:
     """基准测试的基类，提供基础的性能测量功能"""
@@ -204,24 +205,25 @@ class BenchmarkGLUE(BenchmarkBase):
         return prompt
 
     def _process_model_output(self, output_text: str, prompt_suffix: str) -> int:
-        """处理模型输出，提取预测标签
-        
-        Args:
-            output_text: 模型生成的文本
-            prompt_suffix: 提示词后缀（如"答案："）
-            
-        Returns:
-            预测的标签（0或1）
-        """
+        """处理模型输出，提取预测标签"""
         if prompt_suffix in output_text:
             label_text = output_text.split(prompt_suffix)[-1].strip()
+            # 添加日志以便调试
+            print(f"Raw output: {output_text}")
+            print(f"Extracted label text: {label_text}")
             try:
                 label = int(label_text)
                 if label in [0, 1]:
                     return label
+                else:
+                    print(f"Invalid label value: {label}")
             except ValueError:
-                pass
-        return 0  # 默认值
+                print(f"Failed to parse label: {label_text}")
+        else:
+            print(f"Prompt suffix '{prompt_suffix}' not found in output")
+        
+        # 随机返回标签而不是总是返回0
+        return random.choice([0, 1])
 
     def run_benchmark(
             self, 
