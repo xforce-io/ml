@@ -155,6 +155,8 @@ class GroupedQueryAttention(AttentionBase):
         # 5. 处理注意力掩码
         if attention_mask is not None:
             # [B, S] -> [B, 1, 1, 1, S]
+            current_seq_len = scores.size(-1)
+            attention_mask = attention_mask[..., :current_seq_len]
             attention_mask = attention_mask.view(batch_size, 1, 1, 1, seq_len)
             scores = scores + attention_mask
         
