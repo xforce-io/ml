@@ -218,8 +218,6 @@ class BenchmarkGLUE(BenchmarkBase):
                     print(f"Invalid label value: {label}")
             except ValueError:
                 print(f"Failed to parse label: {label_text}")
-        else:
-            print(f"Prompt suffix '{prompt_suffix}' not found in output[{output_text}]")
         return 0
 
     def run_benchmark(
@@ -308,7 +306,8 @@ class BenchmarkGLUE(BenchmarkBase):
                     # 处理输出
                     predictions = []
                     for output in outputs:
-                        generated_text = self.tokenizer.decode(output[-10:], skip_special_tokens=True)
+                        generated_text = self.tokenizer.decode(output, skip_special_tokens=True)
+                        print(f"prompt_suffix[{prompt_suffix}] generated_text[{generated_text}]")
                         label = self._process_model_output(generated_text, prompt_suffix)
                         predictions.append(label)
                 
