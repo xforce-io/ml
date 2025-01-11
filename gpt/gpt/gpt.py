@@ -359,38 +359,28 @@ class GPT(nn.Module):
             }
     
     def evaluate(self, dataloader: torch.utils.data.DataLoader) -> Dict[str, float]:
-        """评估模型性能
+        """评估模型
         Args:
-            dataloader: 评估数据的 DataLoader
+            dataloader: 数据加载器
         Returns:
             包含评估指标的字典
         """
         self.eval()
-        total_loss = 0
+        total_loss = 0.0
         total_samples = 0
-        start_time = time.time()
+        eval_start_time = time.time()
         
         with torch.no_grad():
-            progress_bar = tqdm(
-                dataloader,
-                desc="Evaluating",
-                leave=False,
-                ncols=100
-            )
-            for batch in progress_bar:
+            for batch in dataloader:
                 batch = {k: v.to(next(self.parameters()).device) for k, v in batch.items()}
-                outputs = self(**batch)
-                total_loss += outputs["loss"].item() * len(batch["input_ids"])
-                total_samples += len(batch["input_ids"])
+                outputs = self.forward(**batch)
+                loss = outputs["loss"]
                 
-                # 更新进度条
-                progress_bar.set_postfix({
-                    "loss": f"{total_loss/total_samples:.4f}",
-                    "ppl": f"{np.exp(total_loss/total_samples):.2f}"
-                })
+                total_loss += loss.item() * batch["input_ids"].size(0)
+                total_samples += batch["input_ids"].size(0)
         
         avg_loss = total_loss / total_samples
-        eval_time = time.time() - start_time
+        eval_time = time.time() - eval_start_time
         
         return {
             "loss": avg_loss,
@@ -493,3 +483,184 @@ class GPT(nn.Module):
             print("-" * 80)
         
         return epoch_metrics
+
+    def generate(
+            self,
+            input_ids: torch.Tensor,
+            attention_mask: Optional[torch.Tensor] = None,
+            max_new_tokens: int = 20,
+            temperature: float = 1.0,
+            do_sample: bool = True,
+            top_k: Optional[int] = None,
+            top_p: Optional[float] = None,
+            num_beams: Optional[int] = None,
+            pad_token_id: Optional[int] = None,
+            eos_token_id: Optional[int] = None,
+            **kwargs
+    ) -> torch.Tensor:
+        """生成文本
+        Args:
+            input_ids: 输入序列，形状为 [batch_size, seq_len]
+            attention_mask: 注意力掩码，形状为 [batch_size, seq_len]
+            max_new_tokens: 最大生成的新 token 数量
+            temperature: 采样温度
+            do_sample: 是否使用采样
+            top_k: top-k 采样的 k 值
+            top_p: nucleus 采样的概率阈值
+            num_beams: 束搜索的束宽
+            pad_token_id: padding token 的 ID
+            eos_token_id: 结束符 token 的 ID
+        Returns:
+            生成的序列，形状为 [batch_size, seq_len + max_new_tokens]
+        """
+        self.eval()
+        device = next(self.parameters()).device
+        batch_size = input_ids.shape[0]
+        generated = input_ids.clone()
+        
+        # 如果使用束搜索
+        if num_beams is not None and num_beams > 1:
+            return self._generate_beam_search(
+                input_ids,
+                attention_mask,
+                max_new_tokens,
+                num_beams,
+                pad_token_id,
+                eos_token_id
+            )
+        
+        # 自回归生成
+        for _ in range(max_new_tokens):
+            # 准备输入
+            if attention_mask is not None:
+                attention_mask = torch.cat([
+                    attention_mask,
+                    attention_mask.new_ones((batch_size, 1))
+                ], dim=-1)
+            
+            # 前向传播
+            outputs = self.forward(
+                input_ids=generated,
+                attention_mask=attention_mask
+            )
+            next_token_logits = outputs["logits"][:, -1, :] / temperature
+            
+            # 应用采样策略
+            if do_sample:
+                if top_k is not None:
+                    indices_to_remove = next_token_logits < torch.topk(next_token_logits, top_k)[0][..., -1, None]
+                    next_token_logits[indices_to_remove] = float('-inf')
+                if top_p is not None:
+                    sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
+                    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                    sorted_indices_to_remove = cumulative_probs > top_p
+                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                    sorted_indices_to_remove[..., 0] = 0
+                    indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+                    next_token_logits[indices_to_remove] = float('-inf')
+                
+                probs = F.softmax(next_token_logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
+            else:
+                next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+            
+            generated = torch.cat([generated, next_token], dim=1)
+            
+            # 检查是否生成了结束符
+            if eos_token_id is not None and (next_token == eos_token_id).any():
+                break
+        
+        return generated
+
+    def _generate_beam_search(
+            self,
+            input_ids: torch.Tensor,
+            attention_mask: Optional[torch.Tensor],
+            max_new_tokens: int,
+            num_beams: int,
+            pad_token_id: Optional[int],
+            eos_token_id: Optional[int]
+    ) -> torch.Tensor:
+        """使用束搜索生成文本"""
+        batch_size = input_ids.shape[0]
+        device = input_ids.device
+        
+        # 扩展输入以适应束搜索
+        input_ids = input_ids.repeat_interleave(num_beams, dim=0)
+        if attention_mask is not None:
+            attention_mask = attention_mask.repeat_interleave(num_beams, dim=0)
+        
+        # 初始化束搜索状态
+        beam_scores = torch.zeros((batch_size, num_beams), device=device)
+        beam_scores[:, 1:] = float('-inf')
+        beam_scores = beam_scores.view(-1)
+        
+        generated = input_ids.clone()
+        done = [False for _ in range(batch_size)]
+        
+        for _ in range(max_new_tokens):
+            outputs = self.forward(
+                input_ids=generated,
+                attention_mask=attention_mask
+            )
+            next_token_logits = outputs["logits"][:, -1, :]
+            
+            # 计算下一个 token 的分数
+            next_scores = F.log_softmax(next_token_logits, dim=-1) + beam_scores[:, None]
+            next_scores = next_scores.view(batch_size, num_beams * self.config.vocab_size)
+            
+            # 选择最高分的 num_beams 个候选
+            next_scores, next_tokens = torch.topk(next_scores, num_beams, dim=1)
+            
+            # 重新排列生成的序列
+            beam_outputs = []
+            for batch_idx in range(batch_size):
+                if done[batch_idx]:
+                    continue
+                
+                beam_output = []
+                for beam_token in next_tokens[batch_idx]:
+                    beam_idx = beam_token // self.config.vocab_size
+                    token_idx = beam_token % self.config.vocab_size
+                    beam_output.append((
+                        beam_idx,
+                        token_idx,
+                        generated[batch_idx * num_beams + beam_idx].clone()
+                    ))
+                beam_outputs.extend(beam_output)
+            
+            # 更新生成的序列
+            for batch_idx in range(batch_size):
+                if done[batch_idx]:
+                    continue
+                
+                for beam_idx in range(num_beams):
+                    beam_token_idx = batch_idx * num_beams + beam_idx
+                    _, token_idx, beam_output = beam_outputs[beam_token_idx]
+                    generated[beam_token_idx] = torch.cat([
+                        beam_output,
+                        token_idx.unsqueeze(0)
+                    ], dim=0)
+            
+            # 更新束分数
+            beam_scores = next_scores.view(-1)
+            
+            # 检查是否所有序列都生成了结束符
+            if eos_token_id is not None:
+                for batch_idx in range(batch_size):
+                    if done[batch_idx]:
+                        continue
+                    
+                    if (generated[batch_idx * num_beams:
+                                (batch_idx + 1) * num_beams, -1] == eos_token_id).any():
+                        done[batch_idx] = True
+            
+            if all(done):
+                break
+        
+        # 返回每个批次中得分最高的序列
+        output_ids = []
+        for batch_idx in range(batch_size):
+            output_ids.append(generated[batch_idx * num_beams])
+        
+        return torch.stack(output_ids)
