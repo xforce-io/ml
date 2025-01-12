@@ -155,6 +155,8 @@ class GroupedQueryAttention(AttentionBase):
         # 4. 处理注意力掩码
         if attention_mask is not None:
             # [B, S] -> [B, 1, 1, 1, S]
+            current_seq_len = scores.size(-1)
+            attention_mask = attention_mask[..., :current_seq_len]
             attention_mask = attention_mask.unsqueeze(1).unsqueeze(1).unsqueeze(1)
             # 转换为加法掩码
             attention_mask = (1.0 - attention_mask) * -10000.0
