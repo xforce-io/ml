@@ -154,7 +154,10 @@ class GroupedQueryAttention(AttentionBase):
         
         # 4. 处理注意力掩码
         if attention_mask is not None:
-            attention_mask = attention_mask.view(batch_size, 1, 1, 1, seq_len)
+            # [B, S] -> [B, 1, 1, 1, S]
+            attention_mask = attention_mask.unsqueeze(1).unsqueeze(1).unsqueeze(1)
+            # 转换为加法掩码
+            attention_mask = (1.0 - attention_mask) * -10000.0
             scores = scores + attention_mask
         
         # 5. 应用 softmax 和 dropout
