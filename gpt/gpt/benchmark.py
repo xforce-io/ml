@@ -274,7 +274,7 @@ class BenchmarkGLUE(BenchmarkBase):
                 
                 # 准备输入
                 batch_prompts = [
-                        self._prepare_few_shot_prompt(few_shot_examples[:2], example)
+                    self._prepare_few_shot_prompt(few_shot_examples[:2], example)
                     for example in batch_examples
                 ]
                 
