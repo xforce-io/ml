@@ -142,9 +142,9 @@ class GroupedQueryAttention(AttentionBase):
         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
         
         if attention_mask is not None:
-            attention_mask = attention_mask.view(batch_size, 1, 1, seq_len)
-            attention_mask = attention_mask.expand(-1, self.num_kv_heads, -1, -1)
-            attention_mask = attention_mask.reshape(-1, 1, seq_len)
+            current_seq_len = scores.size(-1)
+            attention_mask = attention_mask[..., :current_seq_len]
+            attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, seq_len]
             scores = scores + attention_mask
         
         # 应用 softmax
