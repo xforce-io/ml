@@ -121,42 +121,53 @@ class GroupedQueryAttention(AttentionBase):
         
         # 1. 首先计算 Q、K、V 投影，确保结果是连续的
         q = self.q_proj(x).contiguous()  # [B, S, H]
-        k = self.k_proj(x).contiguous()  # [B, S, kv_size]  其中 kv_size = H * num_kv_heads / num_heads
+        k = self.k_proj(x).contiguous()  # [B, S, kv_size]
         v = self.v_proj(x).contiguous()  # [B, S, kv_size]
         
         # 如果是推理模式且 KV heads 数量不同，则重新投影 K、V
         if not self.training and self.inference_num_kv_heads != self.num_kv_heads:
-            k = self.inference_k_proj(k).contiguous()  # [B, S, inference_kv_size]
-            v = self.inference_v_proj(v).contiguous()  # [B, S, inference_kv_size]
+            k = self.inference_k_proj(k).contiguous()
+            v = self.inference_v_proj(v).contiguous()
+            current_num_kv_heads = self.inference_num_kv_heads
             current_queries_per_kv = self.num_heads // self.inference_num_kv_heads
         else:
+            current_num_kv_heads = self.num_kv_heads
             current_queries_per_kv = self.num_queries_per_kv
         
-        # 重新组织 q、k、v 的形状以减少内存使用
-        # [B, num_kv_heads, queries_per_kv, S, D] -> [B * num_kv_heads, queries_per_kv, S, D]
-        q = q.view(-1, current_queries_per_kv, seq_len, self.head_dim)
-        k = k.view(-1, 1, seq_len, self.head_dim)  # 广播到所有 queries_per_kv
-        v = v.view(-1, 1, seq_len, self.head_dim)
+        # 2. 重塑 Q、K、V
+        # 首先将 Q 分成 num_heads 个头
+        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
+        # 重组为 KV 分组形式
+        q = q.view(batch_size, seq_len, current_num_kv_heads, current_queries_per_kv, self.head_dim)
+        q = q.permute(0, 2, 3, 1, 4)  # [B, num_kv_heads, queries_per_kv, S, D]
         
-        # 计算注意力分数
+        # 重塑 K 和 V
+        k = k.view(batch_size, seq_len, current_num_kv_heads, self.head_dim)
+        v = v.view(batch_size, seq_len, current_num_kv_heads, self.head_dim)
+        k = k.permute(0, 2, 1, 3)  # [B, num_kv_heads, S, D]
+        v = v.permute(0, 2, 1, 3)  # [B, num_kv_heads, S, D]
+        
+        # 3. 计算注意力分数
+        # [B, num_kv_heads, queries_per_kv, S, D] @ [B, num_kv_heads, D, S] 
+        # -> [B, num_kv_heads, queries_per_kv, S, S]
         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
         
+        # 4. 处理注意力掩码
         if attention_mask is not None:
-            current_seq_len = scores.size(-1)
-            attention_mask = attention_mask[..., :current_seq_len]
-            attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, seq_len]
+            # [B, S] -> [B, 1, 1, 1, S]
+            attention_mask = attention_mask.view(batch_size, 1, 1, 1, seq_len)
             scores = scores + attention_mask
         
-        # 应用 softmax
+        # 5. 应用 softmax 和 dropout
         attn_weights = F.softmax(scores, dim=-1)
         attn_weights = F.dropout(attn_weights, p=self.dropout, training=self.training)
         
-        # 计算输出
-        attn_output = torch.matmul(attn_weights, v)
+        # 6. 计算输出
+        # [B, num_kv_heads, queries_per_kv, S, S] @ [B, num_kv_heads, S, D]
+        # -> [B, num_kv_heads, queries_per_kv, S, D]
+        attn_output = torch.matmul(attn_weights, v.unsqueeze(2))
         
-        # 重塑回原始维度
-        attn_output = attn_output.view(batch_size, self.num_kv_heads, current_queries_per_kv, 
-                                     seq_len, self.head_dim)
+        # 7. 重塑回原始维度
         attn_output = attn_output.permute(0, 3, 1, 2, 4).contiguous()
         attn_output = attn_output.view(batch_size, seq_len, self.hidden_size)
         
