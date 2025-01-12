@@ -148,13 +148,12 @@ class GroupedQueryAttention(AttentionBase):
         v = v.permute(0, 2, 1, 3)  # [B, num_kv_heads, S, D]
         
         # 3. 计算注意力分数
-        # [B, num_kv_heads, queries_per_kv, S, D] @ [B, num_kv_heads, D, S] 
-        # -> [B, num_kv_heads, queries_per_kv, S, S]
+        k = k.unsqueeze(2)  # [B, num_kv_heads, 1, S, D]
+        v = v.unsqueeze(2)  # [B, num_kv_heads, 1, S, D]
         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
         
         # 4. 处理注意力掩码
         if attention_mask is not None:
-            # [B, S] -> [B, 1, 1, 1, S]
             attention_mask = attention_mask.view(batch_size, 1, 1, 1, seq_len)
             scores = scores + attention_mask
         
@@ -163,9 +162,7 @@ class GroupedQueryAttention(AttentionBase):
         attn_weights = F.dropout(attn_weights, p=self.dropout, training=self.training)
         
         # 6. 计算输出
-        # [B, num_kv_heads, queries_per_kv, S, S] @ [B, num_kv_heads, S, D]
-        # -> [B, num_kv_heads, queries_per_kv, S, D]
-        attn_output = torch.matmul(attn_weights, v.unsqueeze(2))
+        attn_output = torch.matmul(attn_weights, v)  # v 已经有正确的维度了
         
         # 7. 重塑回原始维度
         attn_output = attn_output.permute(0, 3, 1, 2, 4).contiguous()
