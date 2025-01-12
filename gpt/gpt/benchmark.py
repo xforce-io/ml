@@ -209,15 +209,15 @@ class BenchmarkGLUE(BenchmarkBase):
         if prompt_suffix in output_text:
             label_text = output_text.split(prompt_suffix)[-1].strip()
             # 添加日志以便调试
-            print(f"Raw output: {output_text} label_text: {label_text}")
+            print(f"Raw output[{output_text}] label_text[{label_text}]")
             try:
                 label = int(label_text)
                 if label in [0, 1]:
                     return label
                 else:
-                    print(f"Invalid label value: {label}")
+                    print(f"Invalid label value[{label}]")
             except ValueError:
-                print(f"Failed to parse label: {label_text}")
+                print(f"Failed to parse label[{label_text}]")
         return 0
 
     def run_benchmark(
