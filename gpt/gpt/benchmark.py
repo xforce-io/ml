@@ -211,7 +211,7 @@ class BenchmarkGLUE(BenchmarkBase):
             # 添加日志以便调试
             print(f"Raw output[{output_text}] label_text[{label_text}]")
             try:
-                label = int(label_text)
+                label = int(label_text[0])
                 if label in [0, 1]:
                     return label
                 else:
@@ -274,7 +274,7 @@ class BenchmarkGLUE(BenchmarkBase):
                 
                 # 准备输入
                 batch_prompts = [
-                    self._prepare_few_shot_prompt(few_shot_examples, example)
+                    self._prepare_few_shot_prompt(few_shot_examples[:2], example)
                     for example in batch_examples
                 ]
                 
