@@ -10,8 +10,12 @@ logger = logging.getLogger(__name__)
 
 class Agent:
     """智能体"""
-    def __init__(self, policy: Policy, estimator: Optional[ValueEstimator], 
-                 player_id: int, name: str = ""):
+    def __init__(
+            self, 
+            policy: Policy, 
+            estimator: Optional[ValueEstimator], 
+            player_id: int, 
+            name: str = ""):
         self.policy = policy
         self.estimator = estimator
         self.player_id = player_id

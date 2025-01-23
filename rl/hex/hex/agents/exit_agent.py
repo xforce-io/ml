@@ -140,9 +140,11 @@ class ExitAgent(Agent):
                  board_size: int,
                  player_id: int = 1,
                  name: str = "ExIt"):
+        self.expert = MCTSPolicy(config, board_size)
+
         super().__init__(
-            MCTSPolicy(config, board_size),  # expert policy
-            MCTSPolicy(config, board_size),  # learning policy
+            self.expert,
+            None,
             player_id,
             name
         )
@@ -418,7 +420,7 @@ def create_exit_agent(
     # 如果不使用预训练模型，进行训练
     if not use_network:
         INFO(logger, "No pre-trained model found. Starting training...")
-        agent.train(experiment)
+        agent.train()
     else:
         INFO(logger, f"Using pre-trained model from {model_path}")
     
