@@ -76,22 +76,11 @@ class MCTSNode:
 
 class MCTSPolicy(Policy):
     """基于MCTS的策略"""
-    def __init__(self, simulations_per_move: int = 3000,
-                 c: float = 1.414,
-                 rave_constant: float = 300,
-                 use_rave: bool = False,
-                 selection_strategy: str = 'robust',
-                 player_id: int = 1,
-                 max_depth: int = 50,
-                 base_rollouts_per_leaf: int = 20):
-        self.simulations_per_move = simulations_per_move
-        self.c = c
-        self.rave_constant = rave_constant
-        self.use_rave = use_rave
-        self.selection_strategy = selection_strategy
+    def __init__(self, 
+                 config: MCTSConfig,
+                 player_id: int = 1):
+        self.config = config    
         self.player_id = player_id
-        self.max_depth = max_depth
-        self.base_rollouts_per_leaf = base_rollouts_per_leaf
         # 添加logger属性
         self.logger = logging.getLogger(__name__)
     
@@ -105,7 +94,7 @@ class MCTSPolicy(Policy):
         ratio = 1.0 - (empty_spaces / total_spaces)  # 比例从0到1
         additional_rollouts = int(10 * ratio)  # 最多额外增加10次
         
-        return self.base_rollouts_per_leaf + additional_rollouts
+        return self.config.base_rollouts_per_leaf + additional_rollouts
     
     def _simulate(self, board: Board) -> float:
         """改进的模拟策略，动态调整rollout次数"""
@@ -119,16 +108,16 @@ class MCTSPolicy(Policy):
             original_player = board.current_player
             depth = 0
             
-            while depth < self.max_depth:
+            while depth < self.config.max_depth:
                 valid_moves = board.get_valid_moves()
                 if not valid_moves:
                     rewards.append(0.0)
                     break
                 
                 # 动态调整策略
-                if depth < self.max_depth // 4:  # 开局阶段
+                if depth < self.config.max_depth // 4:  # 开局阶段
                     action = self._get_early_game_action(board, valid_moves)
-                elif depth < self.max_depth * 3 // 4:  # 中局阶段
+                elif depth < self.config.max_depth * 3 // 4:  # 中局阶段
                     if random.random() < 0.8:
                         action = self._get_heuristic_action(board, valid_moves)
                     else:
@@ -143,18 +132,18 @@ class MCTSPolicy(Policy):
                     rewards.append(1.0 if board.current_player == original_player else -1.0)
                     break
             
-            if depth >= self.max_depth:
+            if depth >= self.config.max_depth:
                 rewards.append(self._evaluate_position(board, original_player))
         
         # 返回所有rollout的平均奖励
         return sum(rewards) / len(rewards)
     
     def get_action(self, board: Board, state: State) -> Action:
-        root = MCTSNode(state, use_rave=self.use_rave)
+        root = MCTSNode(state, use_rave=self.config.use_rave)
         root.untried_actions = board.get_valid_moves()
         
         # 串行执行模拟
-        for _ in range(self.simulations_per_move):
+        for _ in range(self.config.simulations):
             board = board.copy()
             self._run_simulation(root, board)
         return self._select_final_action(root)
@@ -181,7 +170,7 @@ class MCTSPolicy(Policy):
     def _select_child(self, node: MCTSNode) -> MCTSNode:
         """选子节点"""
         return max(node.children.values(), 
-                  key=lambda n: n.get_value(self.c, self.rave_constant))
+                  key=lambda n: n.get_value(self.config.c, self.config.rave_constant))
     
     def _expand(self, node: MCTSNode, board: Board) -> MCTSNode:
         """扩展节点"""
@@ -189,7 +178,7 @@ class MCTSPolicy(Policy):
         board.make_move(action)
         child_state = board.get_state()
         child = MCTSNode(child_state, parent=node, action=action, 
-                        use_rave=self.use_rave)
+                        use_rave=self.config.use_rave)
         child.untried_actions = board.get_valid_moves()
         node.children[action] = child
         return child
@@ -415,7 +404,7 @@ class MCTSPolicy(Policy):
 
     def _select_final_action(self, root: MCTSNode) -> Action:
         """根据模拟结果选择最终动作"""
-        if self.selection_strategy == 'robust':
+        if self.config.selection_strategy == 'robust':
             # 选择访问次数最多的动作
             return max(root.children.items(),
                       key=lambda x: x[1].visits)[0]

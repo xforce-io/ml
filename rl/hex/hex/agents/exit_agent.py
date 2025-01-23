@@ -1,7 +1,7 @@
 from __future__ import annotations
 from hex.log import ERROR, INFO
 from hex.agents.agent import Agent, create_random_agent
-from hex.config import ExperimentConfig
+from hex.config import ExitConfig, ExperimentConfig, MCTSConfig
 from hex.hex import Action, Board, State
 from hex.agents.mcts_agent import MCTSPolicy
 from hex.experiment import GameExperiment
@@ -46,33 +46,6 @@ class ReplayMemory:
         if isinstance(index, slice):
             return list(self.memory)[index]
         return self.memory[index]
-
-@dataclass
-class ExitConfig:
-    """Expert Iteration配置"""
-    # MCTS相关配置
-    simulations_per_move: int = 1600
-    max_depth: int = 100
-    c: float = 0.80
-    base_rollouts_per_leaf: int = 40
-    
-    # 训练相关配置
-    batch_size: int = 128
-    memory_size: int = 100000
-    num_iterations: int = 200
-    self_play_games: int = 200
-    temperature: float = 1.0
-    learning_rate: float = 0.001
-    weight_decay: float = 1e-4
-    num_channels: int = 128
-    policy_channels: int = 32
-    value_hidden_size: int = 256
-    name: str = "ExIt-Agent"
-    
-    # 网络相关配置
-    use_network: bool = False  # 是否使用神经网络
-    model_path: Optional[str] = None  # 模型路径
-    model_dir: str = "data/models"  # 模型目录
 
 class HexNet(nn.Module):
     """Hex游戏的神经网络模型"""
@@ -140,7 +113,7 @@ class ExitAgent(Agent):
                  board_size: int,
                  player_id: int = 1,
                  name: str = "ExIt"):
-        self.expert = MCTSPolicy(config, board_size)
+        self.expert = MCTSPolicy(config.mcts_config, board_size)
 
         super().__init__(
             self.expert,
@@ -389,10 +362,13 @@ def create_exit_agent(
     use_network = os.path.exists(model_path)
     
     config = ExitConfig(
-        simulations_per_move=1000,
-        max_depth=100,
-        c=0.8,
-        base_rollouts_per_leaf=20,
+        mcts_config=MCTSConfig(
+            simulations=1000,
+            max_depth=100,
+            c=0.8,
+            base_rollouts_per_leaf=20,
+            name="MCTS"
+        ),
         batch_size=128,
         memory_size=100000,
         num_iterations=100,
@@ -405,8 +381,8 @@ def create_exit_agent(
         value_hidden_size=256,
         name="ExIt-Agent",
         model_dir=exp_config.model_dir,
-        use_network=use_network,  # 如果存在模型则使用网络
-        model_path=model_path if use_network else None  # 设置模型路径
+        use_network=use_network,
+        model_path=model_path if use_network else None
     )
     
     # 创建实验环境和智能体
