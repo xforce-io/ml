@@ -1,4 +1,6 @@
 from __future__ import annotations
+import multiprocessing
+import sys
 from hex.log import ERROR, INFO
 from hex.agents.agent import Agent, create_random_agent
 from hex.config import ExitConfig, ExperimentConfig, MCTSConfig
@@ -391,6 +393,9 @@ def create_exit_agent(
     return agent
 
 if __name__ == "__main__":
+    if sys.platform == 'darwin' or sys.platform == 'linux':
+        multiprocessing.set_start_method('spawn')
+
     exp_config = ExperimentConfig(num_cores=4)
 
     exit_agent = create_exit_agent(board_size=5, player_id=1, exp_config=exp_config)
