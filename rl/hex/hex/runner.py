@@ -322,6 +322,6 @@ class MCTSOptimizer:
 
 if __name__ == "__main__":
     # 设置多进程启动方法
-    if sys.platform == 'darwin':
+    if sys.platform == 'darwin' or sys.platform == 'linux':
         multiprocessing.set_start_method('spawn')
     main() 
