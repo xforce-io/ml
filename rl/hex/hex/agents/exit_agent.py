@@ -4,8 +4,7 @@ from hex.agents.agent import Agent, create_random_agent
 from hex.config import ExitConfig, ExperimentConfig, MCTSConfig
 from hex.hex import Action, Board, State
 from hex.agents.mcts_agent import MCTSPolicy
-from hex.experiment import GameExperiment
-from hex.rl_basic import Episode
+from hex.experiment import ExperimentRunner, HexGameExperiment, GameResult
 import numpy as np
 import torch
 import torch.nn as nn
@@ -13,39 +12,12 @@ import torch.nn.functional as F
 import torch.optim as optim
 import random
 import logging
-from dataclasses import dataclass
-from typing import List, Tuple, Optional, Dict, Any
+from typing import Tuple, Optional
 import os
-from collections import deque
 import matplotlib.pyplot as plt
+from multiprocessing import Manager
 
 logger = logging.getLogger(__name__)
-
-class ReplayMemory:
-    """经验回放缓冲区"""
-    def __init__(self, capacity: int):
-        self.memory = deque(maxlen=capacity)
-    
-    def append(self, experience: Dict[str, Any]):
-        """添加经验"""
-        self.memory.append(experience)
-    
-    def sample(self, batch_size: int) -> List[Dict[str, Any]]:
-        """随机采样经验"""
-        return random.sample(self.memory, batch_size)
-    
-    def __len__(self) -> int:
-        return len(self.memory)
-    
-    def pop(self, index: int = 0):
-        """移除指定位置的经验"""
-        return self.memory.pop(index)
-    
-    def __getitem__(self, index) -> Any:
-        """支持索引和切片访问"""
-        if isinstance(index, slice):
-            return list(self.memory)[index]
-        return self.memory[index]
 
 class HexNet(nn.Module):
     """Hex游戏的神经网络模型"""
@@ -111,6 +83,7 @@ class ExitAgent(Agent):
     def __init__(self, 
                  config: ExitConfig,
                  board_size: int,
+                 num_cores: int,
                  player_id: int = 1,
                  name: str = "ExIt"):
         self.expert = MCTSPolicy(config.mcts_config, board_size)
@@ -119,11 +92,13 @@ class ExitAgent(Agent):
             self.expert,
             None,
             player_id,
-            name
+            name,
+            memory_size=config.memory_size  # 传递 memory_size 给基类
         )
         
         self.config = config
         self.board_size = board_size
+        self.num_cores = num_cores
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # 初始化神经网络和优化器
@@ -139,11 +114,9 @@ class ExitAgent(Agent):
             weight_decay=config.weight_decay
         )
         
-        # 初始化经验回放
-        self.memory = ReplayMemory(config.memory_size)
+        # 初始化其他参数
         self.temperature = config.temperature
-        self.current_episode = Episode(player_id=self.player_id)
-        self.experiment = GameExperiment(board_size=board_size)
+        self.experiment = HexGameExperiment(board_size=board_size)
         
         # 设置use_network并尝试加载模型
         self.use_network = config.use_network
@@ -178,6 +151,9 @@ class ExitAgent(Agent):
                 else:
                     valid_probs = np.ones(len(valid_moves)) / len(valid_moves)
                 
+                # 存储经验
+                self._store_experience(state, valid_moves, valid_probs)
+                
                 # 根据温度参数选择动作
                 if self.temperature > 0:
                     valid_probs = np.power(valid_probs, 1/self.temperature)
@@ -193,42 +169,17 @@ class ExitAgent(Agent):
                 return chosen_action
         
         # 如果不使用神经网络，使用MCTS专家
-        # 注意：这里直接使用expert而不是通过super()调用
         action = self.expert.get_action(board, state)
+        
+        # 存储MCTS专家的经验
+        expert_probs = np.zeros(self.board_size * self.board_size)
+        for valid_move in valid_moves:
+            idx = valid_move.x * self.board_size + valid_move.y
+            expert_probs[idx] = 1.0 if valid_move == action else 0.0
+        self._store_experience(state, valid_moves, expert_probs)
+        
         self.current_episode.add_step(state, action)
         return action
-    
-    def _store_experience(self, state: State, actions: List[Action], probs: np.ndarray):
-        """存储经验到回放缓冲区"""
-        experience = {
-            'state': state,
-            'actions': actions,
-            'action_probs': probs
-        }
-        
-        if len(self.memory) >= self.config.memory_size:
-            self.memory.pop(0)
-        self.memory.append(experience)
-    
-    def update_from_episode(self, episode: Episode, final_reward: float):
-        """从完整对局更新经验
-        
-        Args:
-            episode: 完整的游戏回合
-            final_reward: 最终奖励
-        """
-        # 获取最近添加的经验数量
-        num_states = len(episode.states)
-        if num_states == 0:
-            return
-            
-        # 获取最近添加的经验
-        recent_experiences = self.memory[-num_states:] if len(self.memory) >= num_states else []
-        
-        # 为每个状态-动作对添加最终奖励
-        for exp in recent_experiences:
-            exp['reward'] = final_reward
-            final_reward = -final_reward  # 在对手回合交替奖励符号
     
     def train_iteration(self):
         """执行一次训练迭代"""
@@ -294,43 +245,79 @@ class ExitAgent(Agent):
             ERROR(logger, f"Failed to load model from {path}: {str(e)}")
             return False
 
+    def _process_game_result(self, game_result: GameResult):
+        """处理游戏结果，返回经验数据"""
+        if game_result.winner is None:
+            return None
+        
+        reward = 1.0 if game_result.winner.player_id == game_result.agent1.player_id else -1.0
+        # 返回经验数据
+        experiences = []
+        for episode in game_result.agent1.episodes:
+            for step in episode.steps:
+                experiences.append({
+                    'state': step.state,
+                    'action_probs': step.action_probs,
+                    'reward': reward
+                })
+        return experiences
+
     def train(self):
         """执行完整的训练过程"""
         INFO(logger, f"Starting training with {self.config.num_iterations} iterations")
         INFO(logger, f"Each iteration will play {self.config.self_play_games} self-play games")
-        
+
+        def agentCreator(player_id: int):
+            return ExitAgent(
+                config=self.config,
+                board_size=self.board_size,
+                num_cores=self.num_cores,
+                player_id=player_id,
+                name=f"{self.name}_player_{player_id}"
+            )       
+
+        games_per_process = self.config.self_play_games // self.num_cores
+        experiment_runner = ExperimentRunner(
+            total_rounds=self.config.self_play_games,
+            statistics_rounds=self.config.self_play_games,
+            num_cores=self.num_cores
+        )
+
         for iteration in range(self.config.num_iterations):
             # 训练完一次迭代后，开始使用神经网络
             if iteration > 0:  # 第一次迭代后开始使用神经网络
                 self.use_network = True
             
-            # 自我对弈收集数据
-            for game in range(self.config.self_play_games):
-                # 重置游戏环境
-                self.experiment.board.reset()
-                self.experiment.set_agents(self, self)  # 自我对弈
-                
-                # 进行一局游戏
-                winner, moves = self.experiment.play_game()
-                
-                # 更新经验
-                if winner:
-                    # 获取当前智能体的回合数据
-                    reward = 1.0 if winner.player_id == self.player_id else -1.0
-                    # 注意：这里使用self.current_episode而不是experiment.current_episode
-                    self.update_from_episode(self.current_episode, reward)
-                
+            # 运行实验并获取结果
+            game_results = experiment_runner.run_experiment_in_parallel(
+                lambda: HexGameExperiment(self.board_size),
+                lambda: agentCreator(1),
+                lambda: agentCreator(2),
+                games_per_process,
+                None  # 不使用回调函数
+            )
+
+            # 处理所有游戏结果
+            for game_result in game_results:
+                experiences = self._process_game_result(game_result)
+                if experiences:
+                    # 将经验添加到内存中
+                    for exp in experiences:
+                        if len(self.memory) >= self.config.memory_size:
+                            self.memory.pop(0)
+                        self.memory.append(exp)
+
             # 训练网络
             self.train_iteration()
             
             # 降低温度参数（逐渐减少探索）
             self.temperature = max(0.1, self.temperature * 0.95)
 
-        save_path = os.path.join(self.config.model_dir, f"exit_agent_iter_{iteration + 1}.pth")
-        self.save_model(save_path)
-        INFO(logger, f"Model saved to {save_path}")
+            save_path = os.path.join(self.config.model_dir, f"exit_agent_iter_{iteration + 1}.pth")
+            self.save_model(save_path)
+            INFO(logger, f"Model saved to {save_path}")
 
-    def evaluate(self, experiment: GameExperiment, num_games: int = 100) -> float:
+    def evaluate(self, experiment: HexGameExperiment, num_games: int = 100) -> float:
         """评估智能体的性能，重写基类方法以处理特殊状态"""
         # 保存原始状态
         original_use_network = self.use_network
@@ -390,7 +377,8 @@ def create_exit_agent(
             config=config, 
             board_size=board_size, 
             player_id=player_id,
-            name="ExIt-Agent"
+            name="ExIt-Agent",
+            num_cores=exp_config.num_cores
         )
     
     # 如果不使用预训练模型，进行训练
@@ -403,10 +391,12 @@ def create_exit_agent(
     return agent
 
 if __name__ == "__main__":
-    exit_agent = create_exit_agent(board_size=5, player_id=1)
+    exp_config = ExperimentConfig(num_cores=4)
+
+    exit_agent = create_exit_agent(board_size=5, player_id=1, exp_config=exp_config)
     opponent = create_random_agent(player_id=2)
 
-    experiment = GameExperiment(board_size=5)
+    experiment = HexGameExperiment(board_size=5)
     experiment.set_agents(exit_agent, opponent)
     
     # 记录每次评估的胜率

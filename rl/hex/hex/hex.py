@@ -49,12 +49,13 @@ class Board:
     
     def get_valid_moves(self) -> List[Action]:
         """获取所有合法动作"""
+        # 使用numpy的向量化操作找到所有空位置
+        empty_positions = np.where(self.board == 0)
         moves = []
-        for x in range(self.size):
-            for y in range(self.size):
-                action = Action(x, y)  # 移除 player 参数
-                if self.is_valid_move(action):
-                    moves.append(action)
+        
+        for x, y in zip(*empty_positions):
+            moves.append(Action(x, y))
+        
         return moves
     
     def make_move(self, action: Action) -> Tuple[bool, float]:
