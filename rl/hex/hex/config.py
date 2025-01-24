@@ -34,13 +34,13 @@ class ExperimentConfig:
 @dataclass
 class MCTSConfig:
     """MCTS算法配置"""
-    simulations: int = 1600
+    simulations: int = 1000
     max_depth: int = 100
     c: float = 0.80
     use_rave: bool = False
     rave_constant: float = 300
     selection_strategy: str = 'robust'
-    base_rollouts_per_leaf: int = 40
+    base_rollouts_per_leaf: int = 20
     name: str = "MCTS-Advanced"
 
 @dataclass
@@ -51,8 +51,8 @@ class ExitConfig:
     # 训练相关配置
     batch_size: int = 128
     memory_size: int = 100000
-    num_iterations: int = 50
-    self_play_games: int = 50
+    num_iterations: int = 5
+    self_play_games: int = 200
     temperature: float = 1.0
     learning_rate: float = 0.001
     weight_decay: float = 1e-4

@@ -1,6 +1,7 @@
 from __future__ import annotations
 import multiprocessing
 import sys
+import time
 from hex.log import ERROR, INFO, WARNING
 from hex.agents.agent import Agent, create_random_agent
 from hex.config import ExitConfig, ExperimentConfig, MCTSConfig
@@ -14,7 +15,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import random
 import logging
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List
 import os
 import matplotlib.pyplot as plt
 from multiprocessing import Manager
@@ -135,34 +136,28 @@ class ExitAgent(Agent):
             # 使用神经网络进行预测
             self.network.eval()
             with torch.no_grad():
-                state_tensor = self.network._preprocess_state(state).to(self.device)
+                state_tensor = self.network._preprocess_state(state).unsqueeze(0).to(self.device)
                 policy, value = self.network(state_tensor)
                 
-                # 将策略转换为numpy数组
+                # Convert policy tensor to numpy array
                 policy = policy.cpu().numpy().flatten()
                 
-                # 只保留合法动作的概率
-                valid_probs = np.zeros(len(valid_moves))
-                for i, action in enumerate(valid_moves):
-                    idx = action.x * self.board_size + action.y
-                    valid_probs[i] = policy[idx]
+                # Store experience with numpy array
+                self._store_experience(state, valid_moves, policy)
                 
-                # 归一化概率
-                if valid_probs.sum() > 0:
-                    valid_probs = valid_probs / valid_probs.sum()
-                else:
-                    valid_probs = np.ones(len(valid_moves)) / len(valid_moves)
+                # Filter policy for valid moves only
+                valid_policy = np.array([policy[move.x * self.board_size + move.y] for move in valid_moves])
                 
-                # 存储经验
-                self._store_experience(state, valid_moves, valid_probs)
+                # Normalize the valid moves policy
+                valid_policy = valid_policy / valid_policy.sum()
                 
                 # 根据温度参数选择动作
                 if self.temperature > 0:
-                    valid_probs = np.power(valid_probs, 1/self.temperature)
-                    valid_probs = valid_probs / valid_probs.sum()
-                    action_idx = np.random.choice(len(valid_moves), p=valid_probs)
+                    valid_policy = np.power(valid_policy, 1/self.temperature)
+                    valid_policy = valid_policy / valid_policy.sum()
+                    action_idx = np.random.choice(len(valid_moves), p=valid_policy)
                 else:
-                    action_idx = np.argmax(valid_probs)
+                    action_idx = np.argmax(valid_policy)
                 
                 chosen_action = valid_moves[action_idx]
                 
@@ -171,13 +166,12 @@ class ExitAgent(Agent):
                 return chosen_action
         
         # 如果不使用神经网络，使用MCTS专家
-        action = self.expert.get_action(board, state)
-        
-        # 存储MCTS专家的经验
+        # 创建专家的完整概率分布
         expert_probs = np.zeros(self.board_size * self.board_size)
-        for valid_move in valid_moves:
-            idx = valid_move.x * self.board_size + valid_move.y
-            expert_probs[idx] = 1.0 if valid_move == action else 0.0
+        action = self.expert.get_action(board, state)
+        idx = action.x * self.board_size + action.y
+        expert_probs[idx] = 1.0
+        
         self._store_experience(state, valid_moves, expert_probs)
         
         self.current_episode.add_step(state, action)
@@ -185,19 +179,29 @@ class ExitAgent(Agent):
     
     def train_iteration(self):
         """执行一次训练迭代"""
-        if len(self.memory) < self.config.batch_size:
+        if len(self.experience) < self.config.batch_size:
             return
         
+        start_time = time.time()
+        
+        # Move network to training device (GPU if available)
+        self.network = self.network.to(self.device)
+        
         # 使用ReplayMemory的sample方法
-        batch = self.memory.sample(self.config.batch_size)
+        batch = self.experience.sample(self.config.batch_size)
         
         # 准备训练数据
         states = torch.stack([self.network._preprocess_state(exp['state']) 
-                            for exp in batch]).to(self.device)  # shape: [batch_size, 3, board_size, board_size]
-        target_policies = torch.tensor([exp['action_probs'] 
-                                      for exp in batch]).float().to(self.device)  # shape: [batch_size, board_size * board_size]
-        target_values = torch.tensor([exp['reward'] 
-                                    for exp in batch]).float().to(self.device)  # shape: [batch_size]
+                            for exp in batch]).to(self.device)
+        
+        # 使用numpy.array()预先合并数组，然后一次性转换为tensor
+        target_policies = torch.from_numpy(
+            np.array([exp['action_probs'] for exp in batch])
+        ).float().to(self.device)
+        
+        target_values = torch.from_numpy(
+            np.array([exp['reward'] for exp in batch])
+        ).float().to(self.device)
         
         # 前向传播
         self.network.train()
@@ -217,7 +221,12 @@ class ExitAgent(Agent):
         
         INFO(logger, f"Training iteration completed - "
                         f"Policy Loss: {policy_loss.item():.4f}, "
-                        f"Value Loss: {value_loss.item():.4f}")
+                        f"Value Loss: {value_loss.item():.4f}, "
+                        f"costSec: {time.time() - start_time:.2f}s")
+        
+        # Optionally move network back to CPU after training
+        if self.device.type == "cuda":
+            self.network = self.network.cpu()
     
     def save_model(self, path: str):
         """保存模型"""
@@ -250,9 +259,10 @@ class ExitAgent(Agent):
     def _process_game_result(self, game_result: GameResult):
         """处理游戏结果，返回经验数据"""
         if game_result.winner is None:
-            return None
+            reward = 0.0
+        else:
+            reward = 1.0 if game_result.winner.player_id == game_result.agent1.player_id else -1.0  
         
-        reward = 1.0 if game_result.winner.player_id == game_result.agent1.player_id else -1.0
         # 返回经验数据
         experiences = []
         memory = game_result.agent1.memory
@@ -267,13 +277,18 @@ class ExitAgent(Agent):
         INFO(logger, f"Each iteration will play {self.config.self_play_games} self-play games")
 
         def agentCreator(player_id: int):
-            return ExitAgent(
+            # Create agent with CPU device to avoid CUDA tensor sharing issues
+            agent = ExitAgent(
                 config=self.config,
                 board_size=self.board_size,
                 num_cores=self.num_cores,
                 player_id=player_id,
                 name=f"{self.name}_player_{player_id}"
-            )       
+            )
+            # Force CPU device for multiprocessing
+            agent.device = torch.device("cpu")
+            agent.network = agent.network.to(agent.device)
+            return agent
 
         games_per_process = self.config.self_play_games // self.num_cores
         experiment_runner = ExperimentRunner(
@@ -293,18 +308,15 @@ class ExitAgent(Agent):
                 lambda: agentCreator(1),
                 lambda: agentCreator(2),
                 games_per_process,
-                None  # 不使用回调函数
             )
 
             # 处理所有游戏结果
             for game_result in game_results:
                 experiences = self._process_game_result(game_result)
-                if experiences:
-                    # 将经验添加到内存中
-                    for exp in experiences:
-                        if len(self.memory) >= self.config.memory_size:
-                            self.memory.pop()
-                        self.memory.append(exp)
+                for exp in experiences:
+                    if len(self.experience) >= self.config.memory_size:
+                        self.experience.pop()
+                    self.experience.append(exp)
 
             # 训练网络
             self.train_iteration()
@@ -326,6 +338,9 @@ class ExitAgent(Agent):
         self.use_network = True
         self.temperature = 0.1
         
+        # Ensure network is on the correct device
+        self.network = self.network.to(self.device)
+        
         try:
             # 调用基类的评估方法
             return super().evaluate(experiment, num_games)
@@ -333,6 +348,41 @@ class ExitAgent(Agent):
             # 恢复原始状态
             self.use_network = original_use_network
             self.temperature = original_temperature
+            # Optionally move network back to CPU if needed
+            if self.device.type == "cuda":
+                self.network = self.network.cpu()
+
+    def _store_experience(self, state: State, valid_moves: List[Action], probs: np.ndarray):
+        """存储经验到回放缓冲区
+        
+        Args:
+            state: 当前状态
+            valid_moves: 合法动作列表
+            probs: 动作概率（可能只包含合法动作的概率）
+        """
+        # 创建一个完整的概率分布向量（所有位置）
+        full_probs = np.zeros(self.board_size * self.board_size)
+        
+        # 如果输入的probs是针对所有位置的
+        if len(probs) == self.board_size * self.board_size:
+            full_probs = probs
+        # 如果输入的probs只包含合法动作的概率
+        else:
+            # 将合法动作的概率映射到对应位置
+            for action, prob in zip(valid_moves, probs):
+                idx = action.x * self.board_size + action.y
+                full_probs[idx] = prob
+        
+        # 确保概率和为1
+        if full_probs.sum() > 0:
+            full_probs = full_probs / full_probs.sum()
+        
+        experience = {
+            'state': state,
+            'actions': valid_moves,
+            'action_probs': full_probs  # 现在总是存储完整的概率分布
+        }
+        self.memory.append(experience)
 
 def create_exit_agent(
         board_size: int = 5, 
@@ -347,29 +397,7 @@ def create_exit_agent(
     model_path = os.path.join(exp_config.model_dir, "exit_agent_final.pth")
     use_network = os.path.exists(model_path)
     
-    config = ExitConfig(
-        mcts_config=MCTSConfig(
-            simulations=1000,
-            max_depth=100,
-            c=0.8,
-            base_rollouts_per_leaf=20,
-            name="MCTS"
-        ),
-        batch_size=128,
-        memory_size=100000,
-        num_iterations=100,
-        self_play_games=200,
-        temperature=1.0,
-        learning_rate=0.001,
-        weight_decay=1e-4,
-        num_channels=128,
-        policy_channels=32,
-        value_hidden_size=256,
-        name="ExIt-Agent",
-        model_dir=exp_config.model_dir,
-        use_network=use_network,
-        model_path=model_path if use_network else None
-    )
+    config = ExitConfig()
     
     # 创建实验环境和智能体
     agent = ExitAgent(
@@ -393,7 +421,7 @@ if __name__ == "__main__":
     if sys.platform == 'darwin' or sys.platform == 'linux':
         multiprocessing.set_start_method('spawn')
 
-    exp_config = ExperimentConfig(num_cores=4)
+    exp_config = ExperimentConfig(num_cores=200)
 
     exit_agent = create_exit_agent(board_size=5, player_id=1, exp_config=exp_config)
     opponent = create_random_agent(player_id=2)

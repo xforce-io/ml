@@ -55,7 +55,8 @@ class Agent:
         self.player_id = player_id
         self.name = name
         self.current_episode = Episode(player_id)
-        self.memory = ReplayMemory(memory_size)  # 初始化经验回放缓冲区
+        self.memory = ReplayMemory(memory_size)
+        self.experience = ReplayMemory(memory_size)
     
     def choose_action(self, board: Board) -> Action:
         """选择动作"""
@@ -106,13 +107,10 @@ class Agent:
             opponent = create_random_agent(player_id=3-self.player_id)
             experiment.set_agents(self, opponent)
             
-            winner, _ = experiment.play_game()
-            if winner and winner.player_id == self.player_id:
+            game_result = experiment.play_game()
+            if game_result.winner and game_result.winner.player_id == self.player_id:
                 wins += 1
             
-            if (game + 1) % 10 == 0:
-                INFO(logger, f"Completed {game + 1} evaluation games")
-        
         win_rate = wins / num_games
         INFO(logger, f"Evaluation completed. Win rate: {win_rate:.2%}")
         return win_rate

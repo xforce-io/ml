@@ -8,7 +8,7 @@ from hex.agents.agent import Agent
 from hex.hex import Board
 import concurrent.futures
 
-from hex.log import ERROR, INFO, WARNING
+from hex.log import DEBUG, ERROR, INFO, WARNING
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,7 @@ class GameResult:
             self, 
             agent1: Agent, 
             agent2: Agent, 
-            winner: Agent, 
+            winner: Optional[Agent], 
             moves_count: int,
         ):
         self.agent1 :Agent = agent1
@@ -93,24 +93,18 @@ class ExperimentRunner:
     def _run_game_batch(
             self, 
             gameExperiment: HexGameExperiment,
-            num_games: int,
-            resultProcessor: Optional[Callable[[GameResult], None]] = None) -> List[GameResult]:
+            num_games: int) -> List[GameResult]:
         """运行一批游戏并返回结果列表"""
         start_time = time.time()
         results = []
         
         for no in range(num_games):
-            if no % 10 == 0:
-                INFO(logger, f"Running game {no} of {num_games}")
-
             if time.time() - start_time > self.timeout:
                 WARNING(logger, "Batch timeout reached")
                 break
             
             try:
                 game_result = gameExperiment.play_game()
-                if resultProcessor:
-                    resultProcessor(game_result)
                 results.append(game_result)
             except Exception as e:
                 ERROR(logger, f"Game error: {e}")
@@ -123,8 +117,7 @@ class ExperimentRunner:
             gameExperimentCreator: Callable[[], GameExperiment],
             agent1Creator: Callable[[], Agent],
             agent2Creator: Callable[[], Agent],
-            games_per_process: int,
-            resultProcessor: Optional[Callable[[GameResult], None]] = None) -> List[GameResult]:
+            games_per_process: int) -> List[GameResult]:
         experiments = []
         for _ in range(self.num_cores):
             experiment = gameExperimentCreator()
@@ -140,7 +133,6 @@ class ExperimentRunner:
                     self._run_game_batch,
                     experiment,
                     games_per_process,
-                    resultProcessor
                 )
                 futures.append(future)
             
@@ -198,8 +190,7 @@ class ExperimentRunner:
                 gameExperimentCreator,
                 agent1Creator,
                 agent2Creator,
-                games_per_process,
-                None  # 不使用回调函数
+                games_per_process
             )
             
             # 处理结果

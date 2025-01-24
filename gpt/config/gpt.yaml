@@ -42,4 +42,4 @@ wandb:
 experiment:
   output_dir: "outputs"
   seed: 42
-  task_name: "mrpc"  # 用于 GLUE benchmark 评估 
+  task_name: "sst2"  # 用于 GLUE benchmark 评估 
