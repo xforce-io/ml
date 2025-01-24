@@ -51,8 +51,8 @@ class ExitConfig:
     # 训练相关配置
     batch_size: int = 128
     memory_size: int = 100000
-    num_iterations: int = 200
-    self_play_games: int = 200
+    num_iterations: int = 50
+    self_play_games: int = 50
     temperature: float = 1.0
     learning_rate: float = 0.001
     weight_decay: float = 1e-4

@@ -1,7 +1,7 @@
 from __future__ import annotations
 import multiprocessing
 import sys
-from hex.log import ERROR, INFO
+from hex.log import ERROR, INFO, WARNING
 from hex.agents.agent import Agent, create_random_agent
 from hex.config import ExitConfig, ExperimentConfig, MCTSConfig
 from hex.hex import Action, Board, State
@@ -55,7 +55,7 @@ class HexNet(nn.Module):
         tensor[1] = (board == opponent).float()        # shape: [board_size, board_size]
         tensor[2] = (board == 0).float()              # shape: [board_size, board_size]
         
-        return tensor.unsqueeze(0)  # shape: [1, 3, board_size, board_size]
+        return tensor  # shape: [3, board_size, board_size]
     
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """前向传播"""
@@ -188,8 +188,8 @@ class ExitAgent(Agent):
         if len(self.memory) < self.config.batch_size:
             return
         
-        # 随机采样批次数据
-        batch = random.sample(self.memory, self.config.batch_size)
+        # 使用ReplayMemory的sample方法
+        batch = self.memory.sample(self.config.batch_size)
         
         # 准备训练数据
         states = torch.stack([self.network._preprocess_state(exp['state']) 
@@ -215,7 +215,7 @@ class ExitAgent(Agent):
         total_loss.backward()
         self.optimizer.step()
         
-        self.logger.info(f"Training iteration completed - "
+        INFO(logger, f"Training iteration completed - "
                         f"Policy Loss: {policy_loss.item():.4f}, "
                         f"Value Loss: {value_loss.item():.4f}")
     
@@ -234,7 +234,7 @@ class ExitAgent(Agent):
     def load_model(self, path: str):
         """加载模型"""
         if not os.path.exists(path):
-            self.logger.warning(f"Model file {path} does not exist")
+            WARNING(logger, f"Model file {path} does not exist")
             return False
             
         try:
@@ -255,13 +255,10 @@ class ExitAgent(Agent):
         reward = 1.0 if game_result.winner.player_id == game_result.agent1.player_id else -1.0
         # 返回经验数据
         experiences = []
-        for episode in game_result.agent1.episodes:
-            for step in episode.steps:
-                experiences.append({
-                    'state': step.state,
-                    'action_probs': step.action_probs,
-                    'reward': reward
-                })
+        memory = game_result.agent1.memory
+        for step in range(len(memory)):
+            memory[step]["reward"] = reward
+            experiences.append(memory[step])
         return experiences
 
     def train(self):
@@ -306,7 +303,7 @@ class ExitAgent(Agent):
                     # 将经验添加到内存中
                     for exp in experiences:
                         if len(self.memory) >= self.config.memory_size:
-                            self.memory.pop(0)
+                            self.memory.pop()
                         self.memory.append(exp)
 
             # 训练网络
