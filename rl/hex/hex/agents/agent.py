@@ -1,12 +1,45 @@
 from __future__ import annotations
-from typing import Any, Optional
+from typing import Any, Optional, Dict, List
 from hex.log import INFO
 import logging
+from collections import deque
+import random
 from hex.config import DynaQConfig
-from hex.hex import Action, Board
+from hex.hex import Action, Board, State
 from hex.rl_basic import Episode, LearningConfig, Policy, RLAlgorithm, RandomPolicy, UCBPolicy, ValueEstimator
+import numpy as np
 
 logger = logging.getLogger(__name__)
+
+class ReplayMemory:
+    """经验回放缓冲区"""
+    def __init__(self, capacity: int):
+        self.memory = deque(maxlen=capacity)
+    
+    def append(self, experience: Dict[str, Any]):
+        """添加经验"""
+        self.memory.append(experience)
+    
+    def sample(self, batch_size: int) -> List[Dict[str, Any]]:
+        """随机采样经验"""
+        return random.sample(list(self.memory), batch_size)
+    
+    def extend(self, experiences: List[Dict[str, Any]]):
+        """添加多个经验"""
+        self.memory.extend(experiences)
+    
+    def __len__(self) -> int:
+        return len(self.memory)
+    
+    def pop(self, index: int = 0):
+        """移除指定位置的经验"""
+        return self.memory.pop(index)
+    
+    def __getitem__(self, index) -> Any:
+        """支持索引和切片访问"""
+        if isinstance(index, slice):
+            return list(self.memory)[index]
+        return self.memory[index]
 
 class Agent:
     """智能体"""
@@ -15,12 +48,14 @@ class Agent:
             policy: Policy, 
             estimator: Optional[ValueEstimator], 
             player_id: int, 
-            name: str = ""):
+            name: str = "",
+            memory_size: int = 100000):  # 添加 memory_size 参数
         self.policy = policy
         self.estimator = estimator
         self.player_id = player_id
         self.name = name
         self.current_episode = Episode(player_id)
+        self.memory = ReplayMemory(memory_size)  # 初始化经验回放缓冲区
     
     def choose_action(self, board: Board) -> Action:
         """选择动作"""
@@ -38,6 +73,15 @@ class Agent:
         if self.estimator and board:
             self.estimator.update(self.current_episode, board)
         self.current_episode = Episode(self.player_id)
+    
+    def _store_experience(self, state: State, actions: List[Action], probs: np.ndarray):
+        """存储经验到回放缓冲区"""
+        experience = {
+            'state': state,
+            'actions': actions,
+            'action_probs': probs
+        }
+        self.memory.append(experience)
     
     def evaluate(self, experiment: Any, num_games: int = 100) -> float:
         """评估智能体的性能
@@ -62,6 +106,9 @@ class Agent:
             if winner and winner.player_id == self.player_id:
                 wins += 1
             
+            if (game + 1) % 10 == 0:
+                INFO(logger, f"Completed {game + 1} evaluation games")
+        
         win_rate = wins / num_games
         INFO(logger, f"Evaluation completed. Win rate: {win_rate:.2%}")
         return win_rate

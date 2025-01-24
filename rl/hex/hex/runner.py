@@ -2,14 +2,12 @@ from __future__ import annotations
 from agents.agent import Agent, create_random_agent
 from agents.mcts_agent import MCTSAgent, create_mcts_agent
 from config import ExperimentConfig, MCTSConfig
-from experiment import GameExperiment
-from rl_basic import GreedyPolicy, LearningConfig, RLAlgorithm, RandomPolicy, UCBPolicy
+from experiment import ExperimentRunner, HexGameExperiment
+from rl_basic import GreedyPolicy, RandomPolicy, UCBPolicy
 import numpy as np
 import matplotlib.pyplot as plt
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple
 import logging
-import concurrent.futures
-import time
 import sys
 import multiprocessing
 import argparse
@@ -45,188 +43,6 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
-
-class ExperimentRunner:
-    """实验运行器"""
-    def __init__(self, total_rounds: int, statistics_rounds: int, num_cores: Optional[int] = None):
-        self.total_rounds = total_rounds
-        self.statistics_rounds = statistics_rounds
-        self.num_cores = num_cores
-        self.logger = logging.getLogger(__name__)
-        # 添加超时设置
-        self.timeout = 600  # 每个批次的超时时间（秒）
-    
-    def _run_game_batch(self, board_size: int, agent1_config: dict, agent2_config: dict, num_games: int) -> Tuple[int, int]:
-        """运行一批游戏并返回胜利统计"""
-        wins1 = 0
-        wins2 = 0
-        
-        # 创建新的实验实例
-        local_experiment = GameExperiment(board_size)
-        
-        # 根据配置创建新的智能体
-        if agent1_config['type'] == 'Random':
-            agent1 = Agent(RandomPolicy(), None, player_id=1, name="Random")
-        elif agent1_config['type'] == 'MCTS':
-            agent1 = MCTSAgent(
-                simulations_per_move=agent1_config['simulations'],
-                max_depth=agent1_config['max_depth'],
-                c=agent1_config['c'],
-                use_rave=agent1_config['use_rave'],
-                selection_strategy=agent1_config['strategy'],
-                base_rollouts_per_leaf=agent1_config['base_rollouts_per_leaf'],
-                player_id=1,
-                name=agent1_config['name']
-            )
-        
-        if agent2_config['type'] == 'Random':
-            agent2 = Agent(RandomPolicy(), None, player_id=2, name="Random")
-        elif agent2_config['type'] == 'MCTS':
-            agent2 = MCTSAgent(
-                simulations_per_move=agent2_config['simulations'],
-                max_depth=agent2_config['max_depth'],
-                c=agent2_config['c'],
-                use_rave=agent2_config['use_rave'],
-                selection_strategy=agent2_config['strategy'],
-                base_rollouts_per_leaf=agent2_config['base_rollouts_per_leaf'],
-                player_id=2,
-                name=agent2_config['name']
-            )
-        elif agent2_config['type'] == 'DynaQ':
-            config = LearningConfig(**agent2_config['learning_config'])
-            algorithm = RLAlgorithm(config)
-            agent2 = Agent(algorithm.policy, algorithm.estimator, player_id=2, name="DynaQ")
-        
-        local_experiment.set_agents(agent1, agent2)
-        start_time = time.time()
-        
-        # 添加进度条
-        for no in range(num_games):
-            if time.time() - start_time > self.timeout:
-                self.logger.warning("Batch timeout reached")
-                break
-            
-            try:
-                winner, _ = local_experiment.play_game()
-                if winner == agent1:
-                    wins1 += 1
-                elif winner == agent2:
-                    wins2 += 1
-            except Exception as e:
-                self.logger.error(f"Game error: {e}")
-                continue
-                
-        return wins1, wins2
-        
-    def run_experiment(self, experiment: GameExperiment) -> List[Tuple[float, float]]:
-        """并行运行实验"""
-        win_rates_history = []
-        
-        # 提取智能体配置
-        agent1_config = self._extract_agent_config(experiment.agent1)
-        agent2_config = self._extract_agent_config(experiment.agent2)
-        
-        for round_start in range(0, self.total_rounds, self.statistics_rounds):
-            total_wins = [0, 0]
-            games_per_process = self.statistics_rounds // self.num_cores
-
-            start_time = time.time()
-            batch_wins = [0, 0]
-            with concurrent.futures.ProcessPoolExecutor(max_workers=self.num_cores) as executor:
-                futures = []
-                # 提交任务
-                for _ in range(self.num_cores):
-                    future = executor.submit(
-                        self._run_game_batch,
-                        experiment.board.size,
-                        agent1_config,
-                        agent2_config,
-                        games_per_process
-                    )
-                    futures.append(future)
-                
-                # 等待所有任务完成或超时
-                try:
-                    # 使用更长的超时时间
-                    done, not_done = concurrent.futures.wait(
-                        futures,
-                        timeout=3600,  # 增加超时时间到60秒
-                        return_when=concurrent.futures.ALL_COMPLETED
-                    )
-                    
-                    # 处理完成的任务
-                    for future in done:
-                        try:
-                            wins1, wins2 = future.result(timeout=1)
-                            batch_wins[0] += wins1
-                            batch_wins[1] += wins2
-                        except Exception as e:
-                            self.logger.error(f"Future error: {e}")
-                    
-                    # 处理未完成的任务
-                    if not_done:
-                        self.logger.warning(f"{len(not_done)} tasks did not complete")
-                        for future in not_done:
-                            future.cancel()
-                
-                except Exception as e:
-                    self.logger.error(f"Batch processing error: {e}")
-                
-                finally:
-                    # 确保所有进程都被清理
-                    executor.shutdown(wait=False)
-                    
-            # 累加批次结果
-            total_wins[0] += batch_wins[0]
-            total_wins[1] += batch_wins[1]
-            
-            # 计算并记录胜率
-            total_games = sum(total_wins)
-            if total_games > 0:
-                win_rate1 = total_wins[0] / total_games
-                win_rate2 = total_wins[1] / total_games
-                win_rates_history.append((win_rate1, win_rate2))
-                
-                self.logger.info(f"Round {round_start} - {round_start + self.statistics_rounds}: "
-                               f"{experiment.agent1.name} win rate = {win_rate1:.2f}, "
-                               f"{experiment.agent2.name} win rate = {win_rate2:.2f}, "
-                               f"cost time = {time.time() - start_time:.2f} seconds")
-            
-        return win_rates_history
-
-    def _extract_agent_config(self, agent: Agent) -> dict:
-        """提取智能体配置"""
-        if isinstance(agent, MCTSAgent):
-            return {
-                'type': 'MCTS',
-                'simulations': agent.policy.simulations_per_move,
-                'max_depth': agent.policy.max_depth,
-                'c': agent.policy.c,
-                'use_rave': agent.policy.use_rave,
-                'strategy': agent.policy.selection_strategy,
-                'base_rollouts_per_leaf': agent.policy.base_rollouts_per_leaf,
-                'name': agent.name
-            }
-        elif isinstance(agent.policy, RandomPolicy):
-            return {
-                'type': 'Random',
-                'name': agent.name
-            }
-        elif isinstance(agent.policy, (GreedyPolicy, UCBPolicy)):
-            return {
-                'type': 'DynaQ',
-                'learning_config': {
-                    'algorithm_type': 'DynaQ',
-                    'initial_learning_rate': agent.estimator.learning_rate,
-                    'gamma': agent.estimator.gamma,
-                    'initial_epsilon': 0.3,
-                    'final_epsilon': 0.05,
-                    'planning_steps': 200,
-                    'batch_size': 64,
-                    'memory_size': 50000
-                },
-                'name': agent.name
-            }
 
 def plot_comparison(results: Dict[str, List[Tuple[float, float]]], total_rounds: int, statistics_rounds: int):
     """绘制不同略的比较图"""
@@ -307,7 +123,6 @@ def main():
         mcts_config = MCTSConfig()
     
     # 创建实验环境
-    experiment = GameExperiment(exp_config.board_size)
     runner = ExperimentRunner(
         exp_config.total_rounds,
         exp_config.statistics_rounds,
@@ -326,8 +141,15 @@ def main():
     log_agent_config(agent1)
     log_agent_config(agent2)
     
-    experiment.set_agents(agent1, agent2)
-    results[mcts_config.name] = runner.run_experiment(experiment)
+    def experimentCreator():
+        experiment = HexGameExperiment(exp_config.board_size)
+        return experiment
+    
+    results[mcts_config.name] = runner.run_experiment_and_get_win_rates(
+        experimentCreator,
+        lambda: agent1,
+        lambda: agent2
+    )
     
     # ExIt智能体实验
     logger.info("\nTraining and evaluating ExIt agent")
@@ -345,7 +167,7 @@ def main():
     log_agent_config(agent1)
     log_agent_config(exit_agent)
     
-    results["ExIt-Agent"] = runner.run_experiment(experiment)
+    results["ExIt-Agent"] = runner.run_experiment_and_get_win_rates(experiment)
     
     # 绘制比较图
     plot_comparison(results, exp_config.total_rounds, exp_config.statistics_rounds)
@@ -414,7 +236,7 @@ class MCTSOptimizer:
             base_rollouts_per_leaf=int(params['base_rollouts_per_leaf'])
         )
         
-        experiment = GameExperiment(self.board_size)
+        experiment = HexGameExperiment(self.board_size)
         # 使用指定的核数
         runner = ExperimentRunner(400, 200, num_cores=self.num_cores)
         
