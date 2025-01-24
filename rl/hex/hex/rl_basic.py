@@ -38,6 +38,9 @@ class Episode:
         self.player_id = player_id
         self.reward: float = 0
     
+    def __len__(self):
+        return len(self.states)
+    
     def add_step(self, state: State, action: Action):
         """添加一步经历"""
         self.states.append(state)

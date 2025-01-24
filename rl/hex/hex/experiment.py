@@ -101,7 +101,7 @@ class ExperimentRunner:
         
         for no in range(num_games):
             if no % 10 == 0:
-                INFO(logger, f"Running game {no + 1} of {num_games}")
+                INFO(logger, f"Running game {no} of {num_games}")
 
             if time.time() - start_time > self.timeout:
                 WARNING(logger, "Batch timeout reached")

@@ -31,9 +31,9 @@ class ReplayMemory:
     def __len__(self) -> int:
         return len(self.memory)
     
-    def pop(self, index: int = 0):
+    def pop(self):
         """移除指定位置的经验"""
-        return self.memory.pop(index)
+        return self.memory.pop()
     
     def __getitem__(self, index) -> Any:
         """支持索引和切片访问"""
@@ -74,7 +74,11 @@ class Agent:
             self.estimator.update(self.current_episode, board)
         self.current_episode = Episode(self.player_id)
     
-    def _store_experience(self, state: State, actions: List[Action], probs: np.ndarray):
+    def _store_experience(
+            self, 
+            state: State, 
+            actions: List[Action], 
+            probs: np.ndarray):
         """存储经验到回放缓冲区"""
         experience = {
             'state': state,
