@@ -37,6 +37,12 @@ class Board:
         self.board.fill(0)
         self.current_player = 1
     
+    def set_state(self, state: State):
+        """设置棋盘状态"""
+        assert state.size == self.size, "棋盘大小不匹配"
+        self.board = state.board.copy()
+        self.current_player = state.current_player
+
     def get_state(self) -> State:
         """获取当前状态"""
         return State(self.board, self.current_player)

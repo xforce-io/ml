@@ -257,18 +257,35 @@ class ExitAgent(Agent):
             return False
 
     def _process_game_result(self, game_result: GameResult):
-        """处理游戏结果，返回经验数据"""
+        """处理游戏结果，使用MCTS专家对每个状态进行评估"""
         if game_result.winner is None:
             reward = 0.0
         else:
-            reward = 1.0 if game_result.winner.player_id == game_result.agent1.player_id else -1.0  
-        
-        # 返回经验数据
+            reward = 1.0 if game_result.winner.player_id == game_result.agent1.player_id else -1.0
+
         experiences = []
         memory = game_result.agent1.memory
-        for step in range(len(memory)):
-            memory[step]["reward"] = reward
-            experiences.append(memory[step])
+        
+        # 创建一个新的棋盘用于MCTS搜索
+        board = Board(self.board_size)
+        
+        for experience in memory:
+            state = experience['state']
+            # 将棋盘设置为当前状态
+            board.set_state(state)
+            
+            # 使用MCTS专家进行搜索，获取动作概率分布
+            self.expert.search(board)  # 运行MCTS搜索
+            action_probs = self.expert.get_action_probs(board)  # 获取MCTS访问计数的概率分布
+            
+            # 更新经验数据，加入MCTS的评估结果
+            experience['action_probs'] = action_probs
+            experience['reward'] = reward
+            experiences.append(experience)
+            
+            # 重置MCTS搜索树，准备评估下一个状态
+            self.expert.reset()
+
         return experiences
 
     def train(self):
