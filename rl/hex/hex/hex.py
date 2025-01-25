@@ -39,7 +39,7 @@ class Board:
     
     def set_state(self, state: State):
         """设置棋盘状态"""
-        assert state.size == self.size, "棋盘大小不匹配"
+        assert state.board.shape == self.board.shape, "棋盘大小不匹配"
         self.board = state.board.copy()
         self.current_player = state.current_player
 

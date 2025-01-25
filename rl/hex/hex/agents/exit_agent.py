@@ -89,7 +89,12 @@ class ExitAgent(Agent):
                  num_cores: int,
                  player_id: int = 1,
                  name: str = "ExIt"):
-        self.expert = MCTSPolicy(config.mcts_config, board_size)
+        self.expert = MCTSPolicy(
+            config.mcts_config, 
+            board_size,
+            num_threads=1,
+            player_id=player_id  # 传入 player_id
+        )
 
         super().__init__(
             self.expert,
@@ -128,7 +133,7 @@ class ExitAgent(Agent):
             INFO(logger, f"Loaded model from {config.model_path}")
         
     def choose_action(self, board: Board) -> Action:
-        """选择动作，结合神经网络的预测结果"""
+        """选择动作，结合神经网络的预测结果和MCTS搜索"""
         state = board.get_state()
         valid_moves = board.get_valid_moves()
         
@@ -140,35 +145,42 @@ class ExitAgent(Agent):
                 policy, value = self.network(state_tensor)
                 
                 # Convert policy tensor to numpy array
-                policy = policy.cpu().numpy().flatten()
+                prior_probs = policy.cpu().numpy().flatten()
+                value_estimate = value.item()
                 
-                # Store experience with numpy array
-                self._store_experience(state, valid_moves, policy)
+                # 设置MCTS的先验概率和价值估计
+                self.expert.set_prior_probs(prior_probs)
+                self.expert.set_value_estimate(value_estimate)
                 
-                # Filter policy for valid moves only
-                valid_policy = np.array([policy[move.x * self.board_size + move.y] for move in valid_moves])
+                # 运行MCTS搜索
+                self.expert.search(board)
+                action_probs = self.expert.get_action_probs(board, temperature=self.temperature)
                 
-                # Normalize the valid moves policy
-                valid_policy = valid_policy / valid_policy.sum()
+                # Store experience
+                self._store_experience(state, valid_moves, action_probs)
                 
-                # 根据温度参数选择动作
+                # 根据MCTS的访问计数选择动作
                 if self.temperature > 0:
-                    valid_policy = np.power(valid_policy, 1/self.temperature)
-                    valid_policy = valid_policy / valid_policy.sum()
+                    valid_policy = np.array([action_probs[move.x * self.board_size + move.y] 
+                                           for move in valid_moves])
+                    valid_policy = valid_policy / (valid_policy.sum() + 1e-10)
                     action_idx = np.random.choice(len(valid_moves), p=valid_policy)
                 else:
-                    action_idx = np.argmax(valid_policy)
+                    action_idx = np.argmax([action_probs[move.x * self.board_size + move.y] 
+                                          for move in valid_moves])
                 
                 chosen_action = valid_moves[action_idx]
+                
+                # 重置MCTS搜索树
+                self.expert.reset()
                 
                 # 记录到当前回合
                 self.current_episode.add_step(state, chosen_action)
                 return chosen_action
         
         # 如果不使用神经网络，使用MCTS专家
-        # 创建专家的完整概率分布
-        expert_probs = np.zeros(self.board_size * self.board_size)
         action = self.expert.get_action(board, state)
+        expert_probs = np.zeros(self.board_size * self.board_size)
         idx = action.x * self.board_size + action.y
         expert_probs[idx] = 1.0
         
@@ -257,7 +269,7 @@ class ExitAgent(Agent):
             return False
 
     def _process_game_result(self, game_result: GameResult):
-        """处理游戏结果，使用MCTS专家对每个状态进行评估"""
+        """处理游戏结果，直接返回经验数据，MCTS的计算已在worker中完成"""
         if game_result.winner is None:
             reward = 0.0
         else:
@@ -266,25 +278,9 @@ class ExitAgent(Agent):
         experiences = []
         memory = game_result.agent1.memory
         
-        # 创建一个新的棋盘用于MCTS搜索
-        board = Board(self.board_size)
-        
         for experience in memory:
-            state = experience['state']
-            # 将棋盘设置为当前状态
-            board.set_state(state)
-            
-            # 使用MCTS专家进行搜索，获取动作概率分布
-            self.expert.search(board)  # 运行MCTS搜索
-            action_probs = self.expert.get_action_probs(board)  # 获取MCTS访问计数的概率分布
-            
-            # 更新经验数据，加入MCTS的评估结果
-            experience['action_probs'] = action_probs
             experience['reward'] = reward
             experiences.append(experience)
-            
-            # 重置MCTS搜索树，准备评估下一个状态
-            self.expert.reset()
 
         return experiences
 
@@ -293,18 +289,31 @@ class ExitAgent(Agent):
         INFO(logger, f"Starting training with {self.config.num_iterations} iterations")
         INFO(logger, f"Each iteration will play {self.config.self_play_games} self-play games")
 
-        def agentCreator(player_id: int):
+        def agentCreator(player_id: int, shared_network_state_dict=None):
             # Create agent with CPU device to avoid CUDA tensor sharing issues
             agent = ExitAgent(
                 config=self.config,
                 board_size=self.board_size,
-                num_cores=self.num_cores,
+                num_cores=1,  # 每个worker只用1个核心
                 player_id=player_id,
                 name=f"{self.name}_player_{player_id}"
             )
             # Force CPU device for multiprocessing
             agent.device = torch.device("cpu")
             agent.network = agent.network.to(agent.device)
+            
+            # 加载共享的网络参数
+            if shared_network_state_dict is not None:
+                agent.network.load_state_dict(shared_network_state_dict)
+            
+            # 为每个进程创建独立的MCTS专家
+            agent.expert = MCTSPolicy(
+                self.config.mcts_config,
+                self.board_size,
+                num_threads=1,  # 每个worker只用1个线程
+                player_id=player_id  # 传入正确的 player_id
+            )
+            
             return agent
 
         games_per_process = self.config.self_play_games // self.num_cores
@@ -316,14 +325,17 @@ class ExitAgent(Agent):
 
         for iteration in range(self.config.num_iterations):
             # 训练完一次迭代后，开始使用神经网络
-            if iteration > 0:  # 第一次迭代后开始使用神经网络
+            if iteration > 0:
                 self.use_network = True
+            
+            # 获取当前网络参数以共享给所有worker
+            shared_network_state = self.network.state_dict()
             
             # 运行实验并获取结果
             game_results = experiment_runner.run_experiment_in_parallel(
                 lambda: HexGameExperiment(self.board_size),
-                lambda: agentCreator(1),
-                lambda: agentCreator(2),
+                lambda: agentCreator(1, shared_network_state),
+                lambda: agentCreator(2, shared_network_state),
                 games_per_process,
             )
 
@@ -381,6 +393,7 @@ class ExitAgent(Agent):
         full_probs = np.zeros(self.board_size * self.board_size)
         
         # 如果输入的probs是针对所有位置的
+        assert len(probs) == self.board_size * self.board_size, "概率分布长度不匹配"
         if len(probs) == self.board_size * self.board_size:
             full_probs = probs
         # 如果输入的probs只包含合法动作的概率

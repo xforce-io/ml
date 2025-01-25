@@ -82,10 +82,13 @@ class MCTSPolicy(Policy):
     """基于MCTS的策略"""
     def __init__(self, 
                  config: MCTSConfig,
-                 player_id: int = 1):
+                 board_size: int,
+                 num_threads: int = 1,
+                 player_id: int = 1):  # 添加回 player_id 参数
         self.config = config    
-        self.player_id = player_id
-        # 添加logger属性
+        self.board_size = board_size
+        self.num_threads = num_threads
+        self.player_id = player_id  # 保留 player_id
         self.logger = logging.getLogger(__name__)
         self.prior_probs = None
         self.value_estimate = None
@@ -193,7 +196,7 @@ class MCTSPolicy(Policy):
         
         # 如果有神经网络的先验概率，设置到新节点
         if self.prior_probs is not None:
-            idx = action.x * board.size + action.y
+            idx = action.x * self.board_size + action.y
             child.prior_prob = self.prior_probs[idx]
         
         child.untried_actions = board.get_valid_moves()
