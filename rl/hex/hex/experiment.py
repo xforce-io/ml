@@ -178,6 +178,8 @@ class ExperimentRunner:
         win_rates_history = []
         for round_start in range(0, self.total_rounds, self.statistics_rounds):
             total_wins = [0, 0]
+
+            assert self.statistics_rounds % self.num_cores == 0, "statistics_rounds must be divisible by num_cores"
             games_per_process = self.statistics_rounds // self.num_cores
 
             start_time = time.time()

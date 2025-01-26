@@ -1,8 +1,9 @@
 from __future__ import annotations
+from abc import abstractmethod
 import logging
 import math
 import random
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from hex.agents.agent import Agent
 from hex.hex import Action, Board, State
 from hex.config import MCTSConfig
@@ -78,21 +79,25 @@ class MCTSNode:
         """安全地获取children"""
         return dict(self.children)  # 返回副本
 
+class StatePredictor:
+    @abstractmethod
+    def predict(self, state: State) -> Tuple[np.ndarray, float]:
+        pass
+
 class MCTSPolicy(Policy):
     """基于MCTS的策略"""
     def __init__(self, 
                  config: MCTSConfig,
                  board_size: int,
                  num_threads: int = 1,
-                 player_id: int = 1):  # 添加回 player_id 参数
+                 player_id: int = 1,
+                 state_predictor: StatePredictor = None):  # 添加回 player_id 参数
         self.config = config    
         self.board_size = board_size
         self.num_threads = num_threads
         self.player_id = player_id  # 保留 player_id
-        self.logger = logging.getLogger(__name__)
-        self.prior_probs = None
-        self.value_estimate = None
-    
+        self.state_predictor = state_predictor
+
     def _get_dynamic_rollouts(self, board: Board) -> int:
         """根据剩余空格动态调整rollout次数"""
         empty_spaces = len(board.get_valid_moves())
@@ -108,8 +113,9 @@ class MCTSPolicy(Policy):
     def _simulate(self, board: Board) -> float:
         """使用神经网络的价值估计替代随机模拟"""
         # 如果有神经网络的价值估计，直接使用
-        if self.value_estimate is not None:
-            return self.value_estimate
+        if self.state_predictor is not None:
+            _, value = self.state_predictor.predict(board.get_state())
+            return value
             
         # 否则回退到传统的随机模拟
         rewards = []
@@ -195,7 +201,8 @@ class MCTSPolicy(Policy):
                         use_rave=self.config.use_rave)
         
         # 如果有神经网络的先验概率，设置到新节点
-        if self.prior_probs is not None:
+        if self.state_predictor is not None:
+            self.prior_probs, _ = self.state_predictor.predict(self.board.get_state())
             idx = action.x * self.board_size + action.y
             child.prior_prob = self.prior_probs[idx]
         
@@ -492,14 +499,6 @@ class MCTSPolicy(Policy):
         
         return blocking_score / len(directions)
 
-    def set_prior_probs(self, probs: np.ndarray):
-        """设置神经网络提供的先验概率"""
-        self.prior_probs = probs
-    
-    def set_value_estimate(self, value: float):
-        """设置神经网络提供的价值估计"""
-        self.value_estimate = value
-    
     def search(self, board: Board, num_simulations: int = None):
         """执行MCTS搜索
         
@@ -569,7 +568,6 @@ class MCTSPolicy(Policy):
         if hasattr(self, 'root'):
             delattr(self, 'root')
         self.prior_probs = None
-        self.value_estimate = None
 
 class MCTSAgent(Agent):
     """MCTS智能体"""
