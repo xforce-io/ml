@@ -7,6 +7,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[logging.FileHandler('log/hex.log'), logging.StreamHandler(sys.stdout)])
 
+
 def INFO(logger :logging.Logger, log :str): logger.info(extractLogExpr(log))
 def DEBUG(logger :logging.Logger, log :str): logger.debug(extractLogExpr(log))
 def ERROR(logger :logging.Logger, log :str): logger.error(extractLogExpr(log))
@@ -17,3 +18,8 @@ def extractLogExpr(log :str) :
     if len(log) > MaxLenLog:
         log = log[:int(MaxLenLog*2/3)] + " ...... " + log[-int(MaxLenLog/3):]
     return log.replace("\n", "")
+
+logging.getLogger("uvicorn").setLevel(logging.WARNING)
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+logging.getLogger("asyncio").setLevel(logging.WARNING)
+logging.getLogger("multiprocessing").setLevel(logging.WARNING)

@@ -124,9 +124,8 @@ def main():
     
     # 创建实验环境
     runner = ExperimentRunner(
-        exp_config.total_rounds,
-        exp_config.statistics_rounds,
-        exp_config.num_cores
+        statistics_rounds=exp_config.statistics_rounds,
+        num_cores=exp_config.num_cores
     )
     
     # 存储实验结果
@@ -146,9 +145,11 @@ def main():
         return experiment
     
     results[mcts_config.name] = runner.run_experiment_and_get_win_rates(
-        experimentCreator,
-        lambda: agent1,
-        lambda: agent2
+        gameExperimentCreator=lambda: experimentCreator(),
+        agent1Creator=lambda: agent1,
+        agent2Creator=lambda: agent2,
+        num_games=exp_config.total_rounds,
+        parallel=True
     )
     
     # ExIt智能体实验
@@ -161,13 +162,18 @@ def main():
     
     # 评估ExIt智能体
     agent1 = create_random_agent(player_id=1)
-    experiment.set_agents(agent1, exit_agent)
     
     # 打印智能体配置
     log_agent_config(agent1)
     log_agent_config(exit_agent)
     
-    results["ExIt-Agent"] = runner.run_experiment_and_get_win_rates(experiment)
+    results["ExIt-Agent"] = runner.run_experiment_and_get_win_rates(
+        gameExperimentCreator=lambda: experimentCreator(),
+        agent1Creator=lambda: agent1,
+        agent2Creator=lambda: exit_agent,
+        num_games=exp_config.total_rounds,
+        parallel=True
+    )
     
     # 绘制比较图
     plot_comparison(results, exp_config.total_rounds, exp_config.statistics_rounds)
@@ -238,12 +244,21 @@ class MCTSOptimizer:
         
         experiment = HexGameExperiment(self.board_size)
         # 使用指定的核数
-        runner = ExperimentRunner(400, 200, num_cores=self.num_cores)
+        runner = ExperimentRunner(
+            statistics_rounds=200,
+            num_cores=self.num_cores
+        )
         
         agent1 = create_random_agent(1)
         agent2 = create_mcts_agent(mcts_config, player_id=2)
         experiment.set_agents(agent1, agent2)
-        results = runner.run_experiment(experiment)
+        results = runner.run_experiment_and_get_win_rates(
+            gameExperimentCreator=lambda: experiment,
+            agent1Creator=lambda: agent1,
+            agent2Creator=lambda: agent2,
+            num_games=400,
+            parallel=True
+        )
         win_rates = [rate[1] for rate in results]
         return np.mean(win_rates)
     

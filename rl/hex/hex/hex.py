@@ -32,10 +32,10 @@ class Board:
         self.board = np.zeros((size, size), dtype=int)
         self.current_player = 1
         
-    def reset(self):
+    def reset(self, current_player):
         """重置棋盘"""
         self.board.fill(0)
-        self.current_player = 1
+        self.current_player = current_player
     
     def set_state(self, state: State):
         """设置棋盘状态"""

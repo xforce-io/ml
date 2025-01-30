@@ -3,6 +3,8 @@ import logging
 import os
 from typing import Optional
 
+import torch
+
 @dataclass
 class ExperimentConfig:
     """实验全局配置"""
@@ -34,8 +36,8 @@ class ExperimentConfig:
 @dataclass
 class MCTSConfig:
     """MCTS算法配置"""
-    simulations: int = 1000
-    max_depth: int = 100
+    simulations: int = 100
+    max_depth: int = 50
     c: float = 0.80
     use_rave: bool = False
     rave_constant: float = 300
@@ -46,25 +48,28 @@ class MCTSConfig:
 @dataclass
 class ExitConfig:
     """Expert Iteration配置"""
-    mcts_config: MCTSConfig = MCTSConfig()
-    
-    # 训练相关配置
-    batch_size: int = 128
-    memory_size: int = 100000
-    num_iterations: int = 5
-    self_play_games: int = 200
-    temperature: float = 1.0
-    learning_rate: float = 0.001
-    weight_decay: float = 1e-4
-    num_channels: int = 128
-    policy_channels: int = 32
-    value_hidden_size: int = 256
-    name: str = "ExIt-Agent"
-    
-    # 网络相关配置
-    use_network: bool = False  # 是否使用神经网络
-    model_path: Optional[str] = None  # 模型路径
-    model_dir: str = "data/models"  # 模型目录
+    def __init__(self):
+        # 现有配置
+        self.num_iterations = 5
+        self.self_play_games = 20
+        self.batch_size = 32
+        self.memory_size = 10000
+        self.save_interval = 10
+        self.model_dir = "data/models"
+        self.model_path = None
+        self.use_network = True
+        self.temperature = 1.0
+        self.num_channels = 128
+        self.policy_channels = 32
+        self.learning_rate = 0.001
+        self.weight_decay = 0.001
+        self.mcts_config = MCTSConfig()
+        self.parallel_self_play = True
+        self.parallel_eval = True 
+        
+        # 添加网络服务器配置
+        self.network_server_host = "127.0.0.1"
+        self.network_server_port = 8123
 
 @dataclass
 class DynaQConfig:
@@ -80,3 +85,10 @@ class DynaQConfig:
     memory_size: int = 50000
     name: str = "DynaQ"
 
+def get_current_device():
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        return torch.device("mps")
+    else:
+        return torch.device("cpu")

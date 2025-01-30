@@ -41,6 +41,38 @@ class ReplayMemory:
             return list(self.memory)[index]
         return self.memory[index]
 
+class GameResult:
+    """游戏结果"""
+    def __init__(
+            self, 
+            agent1_id: int, 
+            agent2_id: int, 
+            winner_id: int, 
+            experiences1: List[Dict[str, Any]],
+            moves_count: int,
+        ):
+        self.agent1_id :int = agent1_id
+        self.agent2_id :int = agent2_id
+        self.winner_id :int = winner_id
+        self.experiences1 :List[Dict[str, Any]] = experiences1
+        self.moves_count = moves_count
+
+    def has_winner(self) -> bool:
+        """是否存在获胜者"""
+        return self.winner_id is not None
+    
+    def get_winner(self) -> int:
+        """获取获胜者"""
+        return self.winner_id
+
+    def __str__(self) -> str:
+        return f"GameResult(" \
+            f"agent1_id={self.agent1_id}, " \
+            f"agent2_id={self.agent2_id}, " \
+            f"winner_id={self.winner_id}, " \
+            f"experiences1={self.experiences1}, " \
+            f"moves_count={self.moves_count})"
+    
 class Agent:
     """智能体"""
     def __init__(
@@ -57,7 +89,8 @@ class Agent:
         self.current_episode = Episode(player_id)
         self.memory = ReplayMemory(memory_size)
         self.experience = ReplayMemory(memory_size)
-    
+        self.memory_size = memory_size
+
     def choose_action(self, board: Board) -> Action:
         """选择动作"""
         if self.policy is None:
@@ -65,28 +98,35 @@ class Agent:
             
         state = board.get_state()
         action = self.policy.get_action(board, state)
-        self.current_episode.add_step(state, action)
+        self.current_episode.add_step(
+            board=board, 
+            state=state, 
+            action=action)
         return action
     
-    def reward(self, r: float, board: Optional[Board] = None):
+    def reward(self, r: float, board: Optional[Board] = None) -> List[Dict[str, Any]]:
         """接收奖励并更新值函数"""
         self.current_episode.set_reward(r)
+        experiences = self._store_episode(self.current_episode, r)
+        self.memory.extend(experiences)
         if self.estimator and board:
             self.estimator.update(self.current_episode, board)
         self.current_episode = Episode(self.player_id)
+        return experiences
     
-    def _store_experience(
-            self, 
-            state: State, 
-            actions: List[Action], 
-            probs: np.ndarray):
-        """存储经验到回放缓冲区"""
-        experience = {
-            'state': state,
-            'actions': actions,
-            'action_probs': probs
-        }
-        self.memory.append(experience)
+    def _store_episode(self, episode: Episode, reward: float):
+        """存储一局游戏的经历"""
+        experiences = []
+        for state, actions, probs, action in zip(episode.states, episode.actions, episode.probs, episode.chosen_actions):
+            experience = {
+                'state': state,
+                'actions': actions,
+                'action_probs': probs,
+                'action': action,
+                'reward': reward
+            }
+            experiences.append(experience)
+        return experiences
     
     def evaluate(self, experiment: Any, num_games: int = 100) -> float:
         """评估智能体的性能

@@ -2,9 +2,9 @@ from __future__ import annotations
 import multiprocessing
 import sys
 import time
-from hex.log import ERROR, INFO, WARNING
+from hex.log import ERROR, INFO, DEBUG
 from hex.agents.agent import Agent, create_random_agent
-from hex.config import ExitConfig, ExperimentConfig, MCTSConfig
+from hex.config import ExitConfig, ExperimentConfig
 from hex.hex import Action, Board, State
 from hex.agents.mcts_agent import MCTSPolicy, StatePredictor
 from hex.experiment import ExperimentRunner, HexGameExperiment, GameResult
@@ -12,13 +12,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
-import random
 import logging
 from typing import Tuple, Optional, List
 import os
 import matplotlib.pyplot as plt
-from multiprocessing import Manager
+from hex.agents.network_server import HexNetWrapper, NetworkClient
 
 logger = logging.getLogger(__name__)
 
@@ -87,15 +85,13 @@ class HexNet(nn.Module):
         
         return policy, value
 
-class StatePredictorNetwork(StatePredictor):
-    
-    def __init__(self, HexNet: HexNet):
-        self.network = HexNet
+class RemotePredictor(StatePredictor):
+    """远程预测器"""
+    def __init__(self, client: NetworkClient):
+        self.client = client
 
-    def predict(self, state: State) -> Tuple[torch.Tensor, torch.Tensor]:
-        """预测策略和价值"""
-        state_tensor = self.network._preprocess_state(state).unsqueeze(0).to(self.device)
-        return self.network(state_tensor)
+    def predict(self, state: State) -> Tuple[np.ndarray, float]:
+        return self.client.predict(state)
 
 class ExitAgent(Agent):
     """Expert Iteration智能体"""
@@ -104,98 +100,66 @@ class ExitAgent(Agent):
                  board_size: int,
                  num_cores: int,
                  player_id: int = 1,
-                 name: str = "ExIt"):
+                 name: str = "ExIt",
+                 hex_net_wrapper: Optional[HexNetWrapper] = None):
         super().__init__(
             policy=None,
             estimator=None,
             player_id=player_id,
             name=name,
-            memory_size=config.memory_size  # 传递 memory_size 给基类
+            memory_size=config.memory_size
         )
         
         self.expert :MCTSPolicy = None
         self.config = config
         self.board_size = board_size
         self.num_cores = num_cores
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.use_network = config.use_network
+        self.temperature = config.temperature
         
-        # 初始化神经网络和优化器
-        self.network = HexNet(
-            board_size=board_size,
-            num_channels=config.num_channels,
-            policy_channels=config.policy_channels
-        ).to(self.device)
-        
-        self.optimizer = optim.Adam(
-            self.network.parameters(),
-            lr=config.learning_rate,
-            weight_decay=config.weight_decay
+        if hex_net_wrapper is None:
+            INFO(logger, "Creating network wrapper...")
+            self.hex_net_wrapper = HexNetWrapper(config, board_size)
+            self.hex_net_wrapper.start()
+            INFO(logger, "Network wrapper started")
+        else:
+            self.hex_net_wrapper = hex_net_wrapper
+
+    def clone(self, player_id: int, name: Optional[str] = None) -> ExitAgent:
+        """创建当前智能体的副本"""
+        new_agent = ExitAgent(
+            config=self.config,
+            board_size=self.board_size,
+            num_cores=1,
+            player_id=player_id,
+            name=name or f"{self.name}_player_{player_id}",
+            hex_net_wrapper=self.hex_net_wrapper
         )
         
-        # 初始化其他参数
-        self.temperature = config.temperature
-        self.experiment = HexGameExperiment(board_size=board_size)
+        # 创建MCTS专家，使用主智能体的网络客户端
+        new_agent.expert = MCTSPolicy(
+            self.config.mcts_config,
+            self.board_size,
+            num_threads=1,
+            player_id=player_id,
+            state_predictor=RemotePredictor(self.hex_net_wrapper.network_client)
+        )
         
-        # 设置use_network并尝试加载模型
-        self.use_network = config.use_network
-        if self.use_network and config.model_path:
-            self.load_model(config.model_path)
-            INFO(logger, f"Loaded model from {config.model_path}")
-        
+        return new_agent
+
     def choose_action(self, board: Board) -> Action:
         """选择动作，结合神经网络的预测结果和MCTS搜索"""
         state = board.get_state()
-        valid_moves = board.get_valid_moves()
-        
-        if self.use_network:
-            # 使用神经网络进行预测
-            self.network.eval()
-            with torch.no_grad():
-                policy, value = self.network.predict(state)
-                
-                # Convert policy tensor to numpy array
-                prior_probs = policy.cpu().numpy().flatten()
-                value_estimate = value.item()
-                
-                # 设置MCTS的先验概率和价值估计
-                self.expert.set_prior_probs(prior_probs)
-                self.expert.set_value_estimate(value_estimate)
-                
-                # 运行MCTS搜索
-                self.expert.search(board)
-                action_probs = self.expert.get_action_probs(board, temperature=self.temperature)
-                
-                # Store experience
-                self._store_experience(state, valid_moves, action_probs)
-                
-                # 根据MCTS的访问计数选择动作
-                if self.temperature > 0:
-                    valid_policy = np.array([action_probs[move.x * self.board_size + move.y] 
-                                           for move in valid_moves])
-                    valid_policy = valid_policy / (valid_policy.sum() + 1e-10)
-                    action_idx = np.random.choice(len(valid_moves), p=valid_policy)
-                else:
-                    action_idx = np.argmax([action_probs[move.x * self.board_size + move.y] 
-                                          for move in valid_moves])
-                
-                chosen_action = valid_moves[action_idx]
-                
-                # 重置MCTS搜索树
-                self.expert.reset()
-                
-                # 记录到当前回合
-                self.current_episode.add_step(state, chosen_action)
-                return chosen_action
-        
-        # 如果不使用神经网络，使用MCTS专家
-        action = self.expert.get_action(board, state)
+        action = self.expert.search_and_select_action(board)
         expert_probs = np.zeros(self.board_size * self.board_size)
         idx = action.x * self.board_size + action.y
         expert_probs[idx] = 1.0
         
-        self._store_experience(state, valid_moves, expert_probs)
-        
-        self.current_episode.add_step(state, action)
+        self.current_episode.add_step(
+            board=board, 
+            state=state, 
+            action=action, 
+            probs=expert_probs)
         return action
     
     def train_iteration(self):
@@ -203,239 +167,131 @@ class ExitAgent(Agent):
         if len(self.experience) < self.config.batch_size:
             return
         
-        start_time = time.time()
-        
-        # Move network to training device (GPU if available)
-        self.network = self.network.to(self.device)
-        
-        # 使用ReplayMemory的sample方法
-        batch = self.experience.sample(self.config.batch_size)
-        
-        # 准备训练数据
-        states = torch.stack([self.network._preprocess_state(exp['state']) 
-                            for exp in batch]).to(self.device)
-        
-        # 使用numpy.array()预先合并数组，然后一次性转换为tensor
-        target_policies = torch.from_numpy(
-            np.array([exp['action_probs'] for exp in batch])
-        ).float().to(self.device)
-        
-        target_values = torch.from_numpy(
-            np.array([exp['reward'] for exp in batch])
-        ).float().to(self.device)
-        
-        # 前向传播
-        self.network.train()
-        predicted_policies, predicted_values = self.network(states)  
-        # predicted_policies shape: [batch_size, board_size * board_size]
-        # predicted_values shape: [batch_size, 1]
-        
-        # 计算损失
-        policy_loss = F.cross_entropy(predicted_policies, target_policies)  # shape: scalar
-        value_loss = F.mse_loss(predicted_values.squeeze(), target_values)  # shape: scalar
-        total_loss = policy_loss + value_loss  # shape: scalar
-        
-        # 反向传播和优化
-        self.optimizer.zero_grad()
-        total_loss.backward()
-        self.optimizer.step()
-        
-        INFO(logger, f"Training iteration completed - "
-                        f"Policy Loss: {policy_loss.item():.4f}, "
-                        f"Value Loss: {value_loss.item():.4f}, "
+        try:
+            start_time = time.time()
+            batch = self.experience.sample(self.config.batch_size)
+            
+            # 请求训练
+            result = self.hex_net_wrapper.train(batch)
+            
+            INFO(logger, f"Training iteration completed - "
+                        f"Policy Loss: {result['policy_loss']:.4f}, "
+                        f"Value Loss: {result['value_loss']:.4f}, "
+                        f"Total Loss: {result['total_loss']:.4f}, "
                         f"costSec: {time.time() - start_time:.2f}s")
-        
-        # Optionally move network back to CPU after training
-        if self.device.type == "cuda":
-            self.network = self.network.cpu()
-    
+        except Exception as e:
+            ERROR(logger, f"Training error: {e}")
+
     def save_model(self, path: str):
         """保存模型"""
-        # 确保目录存在
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        
-        torch.save({
-            'network_state_dict': self.network.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'config': self.config,
-            'board_size': self.board_size
-        }, path)
+        try:
+            result = self.hex_net_wrapper.save(path)
+            if result["status"] != "success":
+                ERROR(logger, f"Failed to save model")
+                return False
+            INFO(logger, f"Model saved to {path}")
+            return True
+        except Exception as e:
+            ERROR(logger, f"Error saving model: {e}")
+            return False
     
     def load_model(self, path: str):
         """加载模型"""
-        if not os.path.exists(path):
-            WARNING(logger, f"Model file {path} does not exist")
-            return False
-            
         try:
-            checkpoint = torch.load(path, map_location=self.device)
-            self.network.load_state_dict(checkpoint['network_state_dict'])
-            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            INFO(logger, f"Successfully loaded model from {path}")
+            result = self.hex_net_wrapper.load(path)
+            if result["status"] != "success":
+                ERROR(logger, f"Failed to load model")
+                return False
+            INFO(logger, f"Model loaded from {path}")
             return True
         except Exception as e:
-            ERROR(logger, f"Failed to load model from {path}: {str(e)}")
+            ERROR(logger, f"Error loading model: {e}")
             return False
 
-    def _process_game_result(self, game_result: GameResult):
-        """处理游戏结果，直接返回经验数据，MCTS的计算已在worker中完成"""
-        if game_result.winner is None:
-            reward = 0.0
-        else:
-            reward = 1.0 if game_result.winner.player_id == game_result.agent1.player_id else -1.0
+    def _process_game_result(self, game_result: GameResult) -> List[dict]:
+        return game_result.experiences1
 
-        experiences = []
-        memory = game_result.agent1.memory
-        
-        for experience in memory:
-            experience['reward'] = reward
-            experiences.append(experience)
-
-        return experiences
+    def _create_game_experiment(self) -> HexGameExperiment:
+        """创建游戏实验实例"""
+        return HexGameExperiment(self.board_size)
+    
+    def _create_agent1(self) -> ExitAgent:
+        """创建玩家1的智能体"""
+        return self.clone(1)
+    
+    def _create_agent2(self) -> ExitAgent:
+        """创建玩家2的智能体"""
+        return self.clone(2)
 
     def train(self):
         """执行完整的训练过程"""
         INFO(logger, f"Starting training with {self.config.num_iterations} iterations")
-        INFO(logger, f"Each iteration will play {self.config.self_play_games} self-play games")
-
-        def agentCreator(player_id: int, shared_network_state_dict=None):
-            # Create agent with CPU device to avoid CUDA tensor sharing issues
-            agent = ExitAgent(
-                config=self.config,
-                board_size=self.board_size,
-                num_cores=1,  # 每个worker只用1个核心
-                player_id=player_id,
-                name=f"{self.name}_player_{player_id}"
-            )
-            # Force CPU device for multiprocessing
-            agent.device = torch.device("cpu")
-            agent.network = agent.network.to(agent.device)
-            
-            # 加载共享的网络参数
-            if shared_network_state_dict is not None:
-                agent.network.load_state_dict(shared_network_state_dict)
-            
-            # 为每个进程创建独立的MCTS专家
-            agent.expert = MCTSPolicy(
-                self.config.mcts_config,
-                self.board_size,
-                num_threads=1,  # 每个worker只用1个线程
-                player_id=player_id  # 传入正确的 player_id
-            )
-            
-            return agent
-
-        games_per_process = self.config.self_play_games // self.num_cores
+        
         experiment_runner = ExperimentRunner(
-            total_rounds=self.config.self_play_games,
             statistics_rounds=self.config.self_play_games,
             num_cores=self.num_cores
         )
-
+        
+        # 训练循环
         for iteration in range(self.config.num_iterations):
-            # 训练完一次迭代后，开始使用神经网络
-            if iteration > 0:
-                self.use_network = True
-            
-            # 获取当前网络参数以共享给所有worker
-            shared_network_state = self.network.state_dict()
-            
-            # 运行实验并获取结果
-            game_results = experiment_runner.run_experiment_in_parallel(
-                lambda: HexGameExperiment(self.board_size),
-                lambda: agentCreator(1, shared_network_state),
-                lambda: agentCreator(2, shared_network_state),
-                games_per_process,
+            # 自我对弈收集数据
+            game_results = experiment_runner.run_experiments(
+                gameExperimentCreator=self._create_game_experiment,
+                agent1Creator=self._create_agent1,
+                agent2Creator=self._create_agent2,
+                num_games=self.config.self_play_games,
+                parallel=self.config.parallel_self_play
             )
-
-            # 处理所有游戏结果
+            
+            # 处理游戏结果，收集训练数据
             for game_result in game_results:
                 experiences = self._process_game_result(game_result)
                 for exp in experiences:
                     if len(self.experience) >= self.config.memory_size:
                         self.experience.pop()
                     self.experience.append(exp)
-
+            
             # 训练网络
             self.train_iteration()
             
-            # 降低温度参数（逐渐减少探索）
+            # 每隔一定轮次保存模型
+            if (iteration + 1) % self.config.save_interval == 0:
+                model_path = os.path.join(self.config.model_dir, f"exit_agent_{iteration+1}.pth")
+                self.save_model(model_path)
+            
+            # 降低温度参数
             self.temperature = max(0.1, self.temperature * 0.95)
 
-            save_path = os.path.join(self.config.model_dir, f"exit_agent_iter_{iteration + 1}.pth")
-            self.save_model(save_path)
-            INFO(logger, f"Model saved to {save_path}")
-
     def evaluate(self, experiment: HexGameExperiment, num_games: int = 100) -> float:
-        """使用并行方式评估智能体的性能"""
-
+        """评估智能体的性能"""
         assert num_games % self.num_cores == 0, "num_games must be divisible by num_cores"
         
         # 保存原始状态
         original_use_network = self.use_network
         original_temperature = self.temperature
         
-        # 设置评估状态
-        self.use_network = True
-        self.temperature = 0.1
-        
         try:
-            # 创建实验运行器
+            # 设置评估状态
+            self.use_network = True
+            self.temperature = 0.1
+            
             experiment_runner = ExperimentRunner(
-                total_rounds=num_games,
                 statistics_rounds=num_games,
                 num_cores=self.num_cores
             )
             
-            def evaluator_creator(player_id: int):
-                # 创建评估用的智能体
-                agent = ExitAgent(
-                    config=self.config,
-                    board_size=self.board_size,
-                    num_cores=1,  # 每个worker只用1个核心
-                    player_id=player_id,
-                    name=f"{self.name}_evaluator_{player_id}"
-                )
-                # 强制使用CPU
-                agent.device = torch.device("cpu")
-                agent.network = agent.network.to(agent.device)
-                
-                # 加载当前模型的参数
-                agent.network.load_state_dict(self.network.state_dict())
-                
-                # 创建MCTS专家
-                agent.expert = MCTSPolicy(
-                    self.config.mcts_config,
-                    self.board_size,
-                    num_threads=1,
-                    player_id=player_id,
-                    state_predictor=StatePredictorNetwork(agent.network)
-                )
-                
-                # 设置评估模式
-                agent.use_network = True
-                agent.temperature = 0.1
-                
-                return agent
-            
-            # 创建随机对手
-            def opponent_creator(player_id: int):
-                return create_random_agent(player_id)
-            
-            # 计算每个进程需要运行的游戏数
-            games_per_process = num_games // self.num_cores
-            
             # 运行并行评估
-            game_results = experiment_runner.run_experiment_in_parallel(
-                lambda: HexGameExperiment(self.board_size),
-                lambda: evaluator_creator(1),  # 评估智能体总是玩家1
-                lambda: opponent_creator(2),    # 随机对手总是玩家2
-                games_per_process
+            game_results = experiment_runner.run_experiments(
+                gameExperimentCreator=lambda: experiment,
+                agent1Creator=lambda: self.clone(1),  # 评估智能体总是玩家1
+                agent2Creator=lambda: create_random_agent(2),  # 随机对手总是玩家2
+                num_games=num_games,
+                parallel=self.config.parallel_eval
             )
             
             # 统计胜率
             wins = sum(1 for result in game_results 
-                      if result.winner and result.winner.player_id == 1)
+                      if result.has_winner() and result.get_winner() == 1)
             win_rate = wins / len(game_results)
             
             INFO(logger, f"Evaluation completed. Win rate: {win_rate:.2%}")
@@ -445,39 +301,6 @@ class ExitAgent(Agent):
             # 恢复原始状态
             self.use_network = original_use_network
             self.temperature = original_temperature
-
-    def _store_experience(self, state: State, valid_moves: List[Action], probs: np.ndarray):
-        """存储经验到回放缓冲区
-        
-        Args:
-            state: 当前状态
-            valid_moves: 合法动作列表
-            probs: 动作概率（可能只包含合法动作的概率）
-        """
-        # 创建一个完整的概率分布向量（所有位置）
-        full_probs = np.zeros(self.board_size * self.board_size)
-        
-        # 如果输入的probs是针对所有位置的
-        assert len(probs) == self.board_size * self.board_size, "概率分布长度不匹配"
-        if len(probs) == self.board_size * self.board_size:
-            full_probs = probs
-        # 如果输入的probs只包含合法动作的概率
-        else:
-            # 将合法动作的概率映射到对应位置
-            for action, prob in zip(valid_moves, probs):
-                idx = action.x * self.board_size + action.y
-                full_probs[idx] = prob
-        
-        # 确保概率和为1
-        if full_probs.sum() > 0:
-            full_probs = full_probs / full_probs.sum()
-        
-        experience = {
-            'state': state,
-            'actions': valid_moves,
-            'action_probs': full_probs  # 现在总是存储完整的概率分布
-        }
-        self.memory.append(experience)
 
 def create_exit_agent(
         board_size: int = 5, 
@@ -500,7 +323,8 @@ def create_exit_agent(
             board_size=board_size, 
             player_id=player_id,
             name="ExIt-Agent",
-            num_cores=exp_config.num_cores
+            num_cores=exp_config.num_cores,
+            hex_net_wrapper=None
         )
     
     # 如果不使用预训练模型，进行训练
@@ -516,7 +340,7 @@ if __name__ == "__main__":
     if sys.platform == 'darwin' or sys.platform == 'linux':
         multiprocessing.set_start_method('spawn')
 
-    exp_config = ExperimentConfig(num_cores=200)
+    exp_config = ExperimentConfig(num_cores=5)
 
     exit_agent = create_exit_agent(board_size=5, player_id=1, exp_config=exp_config)
     opponent = create_random_agent(player_id=2)
@@ -530,7 +354,7 @@ if __name__ == "__main__":
     
     for i in range(10):
         # 评估并记录胜率
-        win_rate = exit_agent.evaluate(experiment, 300)
+        win_rate = exit_agent.evaluate(experiment, 50)
         win_rates.append(win_rate)
         iterations.append(i)
         

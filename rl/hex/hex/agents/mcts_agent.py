@@ -3,13 +3,16 @@ from abc import abstractmethod
 import logging
 import math
 import random
+import time
 from typing import Dict, List, Optional, Tuple
 from hex.agents.agent import Agent
 from hex.hex import Action, Board, State
 from hex.config import MCTSConfig
+from hex.log import INFO, ERROR
 from hex.rl_basic import Policy
 import numpy as np
 
+logger = logging.getLogger(__name__)
 
 class MCTSNode:
     """MCTS树节点"""
@@ -30,6 +33,7 @@ class MCTSNode:
             self.rave_value = 0.0
         
         self.prior_prob = 0.0  # 添加先验概率属性
+        self.value_prediction = None  # 添加价值预测属性
     
     def update(self, reward: float):
         """更新节点统计"""
@@ -59,11 +63,16 @@ class MCTSNode:
         return len(self.untried_actions) == 0
     
     def get_value(self, c: float = 1.414, rave_constant: float = 300) -> float:
-        """节点评估，结合先验概率"""
+        """节点评估，结合先验概率和价值预测"""
         if self.visits == 0:
-            return float('inf')
+            # 如果有价值预测，在未访问时使用它
+            return self.value_prediction if self.value_prediction is not None else float('inf')
             
         mc_score = self.value / self.visits
+        # 如果有价值预测，将其与MC分数结合
+        if self.value_prediction is not None:
+            mc_score = 0.8 * mc_score + 0.2 * self.value_prediction
+            
         # 加入先验概率的影响
         exploration = c * self.prior_prob * math.sqrt(math.log(self.parent.visits) / self.visits)
         
@@ -91,13 +100,201 @@ class MCTSPolicy(Policy):
                  board_size: int,
                  num_threads: int = 1,
                  player_id: int = 1,
-                 state_predictor: StatePredictor = None):  # 添加回 player_id 参数
+                 state_predictor: StatePredictor = None):
         self.config = config    
         self.board_size = board_size
         self.num_threads = num_threads
-        self.player_id = player_id  # 保留 player_id
+        self.player_id = player_id
         self.state_predictor = state_predictor
+        self.prior_probs = None
+        self.value_estimate = None
 
+    def search(self, board: Board, num_simulations: int = None) -> np.ndarray:
+        """执行MCTS搜索并返回动作概率分布
+        
+        Args:
+            board: 当前棋盘状态
+            num_simulations: 可选的模拟次数
+            
+        Returns:
+            np.ndarray: 所有可能位置的动作概率
+        """
+        if num_simulations is None:
+            num_simulations = self.config.simulations
+            
+        root = MCTSNode(board.get_state(), use_rave=self.config.use_rave)
+        root.untried_actions = board.get_valid_moves()
+        
+        for _ in range(num_simulations):
+            board_copy = board.copy()
+            self._run_simulation(root, board_copy)
+            
+        self.root = root
+        action_probs = self.get_action_probs(board)
+        return action_probs
+
+    def select_action(self, board: Board, action_probs: np.ndarray, temperature: float = 1.0) -> Action:
+        """根据动作概率选择动作"""
+        valid_moves = board.get_valid_moves()
+        
+        # 提取合法动作的概率
+        valid_probs = []
+        for move in valid_moves:
+            idx = move.x * board.size + move.y
+            valid_probs.append(action_probs[idx])
+        
+        valid_probs = np.array(valid_probs)
+        
+        # 应用温度
+        if temperature != 1.0:
+            valid_probs = np.power(valid_probs, 1.0 / temperature)
+        
+        # 确保概率和为1
+        valid_probs = valid_probs / np.sum(valid_probs)
+        
+        # 如果概率和太小，使用均匀分布
+        if np.sum(valid_probs) < 1e-6:
+            valid_probs = np.ones(len(valid_moves)) / len(valid_moves)
+        
+        try:
+            action_idx = np.random.choice(len(valid_moves), p=valid_probs)
+            return valid_moves[action_idx]
+        except ValueError as e:
+            # 如果仍然出现问题，记录详细信息并使用均匀分布
+            ERROR(logger, f"Error in select_action: {e}, valid_probs={valid_probs}, sum={np.sum(valid_probs)}")
+            action_idx = np.random.choice(len(valid_moves))
+            return valid_moves[action_idx]
+
+    def search_and_select_action(self, board: Board, temperature: float = 1.0) -> Action:
+        """执行搜索并选择动作
+        
+        Args:
+            board: 当前棋盘状态
+            temperature: 温度参数
+            
+        Returns:
+            Action: 选择的动作
+        """
+        probs = self.search(board)
+        action = self.select_action(board, probs, temperature)
+        self.reset()  # 重置搜索树
+        return action
+
+    def get_action_probs(self, board: Board, temperature: float = 1.0) -> np.ndarray:
+        """获取基于访问次数的动作概率分布"""
+        if not hasattr(self, 'root'):
+            raise ValueError("Must call search() before get_action_probs()")
+            
+        visits = np.zeros(board.size * board.size)
+        
+        # 收集所有子节点的访问次数
+        for action, child in self.root.children.items():
+            idx = action.x * board.size + action.y
+            visits[idx] = child.visits
+            
+        if temperature == 0:
+            # 选择访问次数最多的动作
+            best_idx = np.argmax(visits)
+            probs = np.zeros_like(visits)
+            probs[best_idx] = 1.0
+            return probs
+            
+        # 应用温度
+        if temperature != 1.0:
+            visits = np.power(visits, 1.0/temperature)
+            
+        # 归一化得到概率分布
+        total_visits = visits.sum()
+        if total_visits > 0:
+            probs = visits / total_visits
+        else:
+            # 如果没有访问记录，使用均匀分布
+            valid_moves = board.get_valid_moves()
+            probs = np.zeros_like(visits)
+            for move in valid_moves:
+                idx = move.x * board.size + move.y
+                probs[idx] = 1.0 / len(valid_moves)
+                
+        return probs
+
+    def reset(self):
+        """重置搜索树"""
+        if hasattr(self, 'root'):
+            delattr(self, 'root')
+        self.prior_probs = None
+        self.value_estimate = None
+
+    # 以下是私有方法...
+    def _run_simulation(self, root: MCTSNode, board: Board) -> None:
+        """运行单次模拟"""
+        node = root
+        
+        # Selection
+        while not node.is_terminal() and node.is_fully_expanded():
+            node = self._select_child(node)
+            board.make_move(node.action)
+        
+        # Expansion
+        if not node.is_terminal() and not node.is_fully_expanded():
+            node = self._expand(node, board)
+        
+        # Simulation
+        reward = self._simulate(board)
+        
+        # Backpropagation
+        self._backpropagate(node, reward)
+    
+    def _select_child(self, node: MCTSNode) -> MCTSNode:
+        """选子节点"""
+        return max(node.children.values(), 
+                  key=lambda n: n.get_value(self.config.c, self.config.rave_constant))
+    
+    def _expand(self, node: MCTSNode, board: Board) -> MCTSNode:
+        """扩展节点，结合策略网络和随机选择"""
+        action = None
+        value = None
+        
+        if self.state_predictor is not None:
+            # 获取预测值
+            probs, value = self.state_predictor.predict(node.state)
+            
+            if random.random() < 0.3:  # 30%概率使用策略网络
+                # 获取所有未尝试动作的策略预测值
+                valid_probs = []
+                for act in node.untried_actions:
+                    idx = act.x * self.board_size + act.y
+                    valid_probs.append((probs[idx], idx, act))  # 添加idx作为稳定的第二排序键
+                
+                if valid_probs:  # 确保有有效动作
+                    # 按概率排序
+                    valid_probs.sort(key=lambda x: (-x[0], x[1]))  # 使用负概率实现降序，idx作为次要排序键
+                    # 确保top_k至少为1
+                    top_k = max(1, min(3, len(valid_probs) // 4))  # 取前25%的动作，但至少1个，最多3个
+                    action = valid_probs[random.randint(0, top_k-1)][2]  # 获取Action对象
+                    node.untried_actions.remove(action)
+        
+        # 如果没有使用策略网络或随机选择不使用策略网络
+        if action is None and node.untried_actions:  # 确保有未尝试的动作
+            action = random.choice(node.untried_actions)
+            node.untried_actions.remove(action)
+        
+        # 如果没有可用动作，返回None或抛出异常
+        if action is None:
+            raise ValueError("No valid actions available for expansion")
+        
+        board.make_move(action)
+        child_state = board.get_state()
+        child = MCTSNode(child_state, parent=node, action=action, 
+                         use_rave=self.config.use_rave)
+        
+        # 保存价值预测
+        if value is not None:
+            child.value_prediction = value
+        
+        child.untried_actions = board.get_valid_moves()
+        node.children[action] = child
+        return child
+    
     def _get_dynamic_rollouts(self, board: Board) -> int:
         """根据剩余空格动态调整rollout次数"""
         empty_spaces = len(board.get_valid_moves())
@@ -157,58 +354,6 @@ class MCTSPolicy(Policy):
         
         # 返回所有rollout的平均奖励
         return sum(rewards) / len(rewards)
-    
-    def get_action(self, board: Board, state: State) -> Action:
-        root = MCTSNode(state, use_rave=self.config.use_rave)
-        root.untried_actions = board.get_valid_moves()
-        
-        # 串行执行模拟
-        for _ in range(self.config.simulations):
-            board = board.copy()
-            self._run_simulation(root, board)
-        return self._select_final_action(root)
-    
-    def _run_simulation(self, root: MCTSNode, board: Board) -> None:
-        """运行单次模拟"""
-        node = root
-        
-        # Selection
-        while not node.is_terminal() and node.is_fully_expanded():
-            node = self._select_child(node)
-            board.make_move(node.action)
-        
-        # Expansion
-        if not node.is_terminal() and not node.is_fully_expanded():
-            node = self._expand(node, board)
-        
-        # Simulation
-        reward = self._simulate(board)
-        
-        # Backpropagation
-        self._backpropagate(node, reward)
-    
-    def _select_child(self, node: MCTSNode) -> MCTSNode:
-        """选子节点"""
-        return max(node.children.values(), 
-                  key=lambda n: n.get_value(self.config.c, self.config.rave_constant))
-    
-    def _expand(self, node: MCTSNode, board: Board) -> MCTSNode:
-        """扩展节点，使用神经网络的先验概率"""
-        action = node.untried_actions.pop()
-        board.make_move(action)
-        child_state = board.get_state()
-        child = MCTSNode(child_state, parent=node, action=action, 
-                        use_rave=self.config.use_rave)
-        
-        # 如果有神经网络的先验概率，设置到新节点
-        if self.state_predictor is not None:
-            self.prior_probs, _ = self.state_predictor.predict(self.board.get_state())
-            idx = action.x * self.board_size + action.y
-            child.prior_prob = self.prior_probs[idx]
-        
-        child.untried_actions = board.get_valid_moves()
-        node.children[action] = child
-        return child
     
     def _get_early_game_action(self, board: Board, valid_moves: List[Action]) -> Action:
         """开局策略"""
@@ -429,17 +574,6 @@ class MCTSPolicy(Policy):
         
         return paths / size  # 归一化
 
-    def _select_final_action(self, root: MCTSNode) -> Action:
-        """根据模拟结果选择最终动作"""
-        if self.config.selection_strategy == 'robust':
-            # 选择访问次数最多的动作
-            return max(root.children.items(),
-                      key=lambda x: x[1].visits)[0]
-        else:
-            # 选择平均奖励最高的动作
-            return max(root.children.items(),
-                      key=lambda x: x[1].value / (x[1].visits + 1e-10))[0]
-
     def _evaluate_bridge_potential(self, board: Board, move: Action) -> float:
         """评估形成桥接潜力"""
         directions = [(0,1), (1,0), (-1,0), (0,-1), (1,-1), (-1,1)]
@@ -498,76 +632,6 @@ class MCTSPolicy(Policy):
                     blocking_score += connected_count / len(directions)
         
         return blocking_score / len(directions)
-
-    def search(self, board: Board, num_simulations: int = None):
-        """执行MCTS搜索
-        
-        Args:
-            board: 当前棋盘状态
-            num_simulations: 可选的模拟次数，如果不指定则使用配置中的值
-        """
-        if num_simulations is None:
-            num_simulations = self.config.simulations
-            
-        root = MCTSNode(board.get_state(), use_rave=self.config.use_rave)
-        root.untried_actions = board.get_valid_moves()
-        
-        for _ in range(num_simulations):
-            board_copy = board.copy()
-            self._run_simulation(root, board_copy)
-            
-        self.root = root  # 保存搜索树的根节点
-    
-    def get_action_probs(self, board: Board, temperature: float = 1.0) -> np.ndarray:
-        """获取基于访问次数的动作概率分布
-        
-        Args:
-            board: 当前棋盘状态
-            temperature: 温度参数，控制探索程度
-            
-        Returns:
-            np.ndarray: 所有可能位置的动作概率
-        """
-        if not hasattr(self, 'root'):
-            raise ValueError("Must call search() before get_action_probs()")
-            
-        visits = np.zeros(board.size * board.size)
-        
-        # 收集所有子节点的访问次数
-        for action, child in self.root.children.items():
-            idx = action.x * board.size + action.y
-            visits[idx] = child.visits
-            
-        if temperature == 0:
-            # 选择访问次数最多的动作
-            best_idx = np.argmax(visits)
-            probs = np.zeros_like(visits)
-            probs[best_idx] = 1.0
-            return probs
-            
-        # 应用温度
-        if temperature != 1.0:
-            visits = np.power(visits, 1.0/temperature)
-            
-        # 归一化得到概率分布
-        total_visits = visits.sum()
-        if total_visits > 0:
-            probs = visits / total_visits
-        else:
-            # 如果没有访问记录，使用均匀分布
-            valid_moves = board.get_valid_moves()
-            probs = np.zeros_like(visits)
-            for move in valid_moves:
-                idx = move.x * board.size + move.y
-                probs[idx] = 1.0 / len(valid_moves)
-                
-        return probs
-    
-    def reset(self):
-        """重置搜索树"""
-        if hasattr(self, 'root'):
-            delattr(self, 'root')
-        self.prior_probs = None
 
 class MCTSAgent(Agent):
     """MCTS智能体"""

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from hex.hex import Action, Board, State
 import numpy as np
 import random
-from typing import List, Tuple, Dict
+from typing import List, Optional, Tuple, Dict
 
 @dataclass
 class LearningConfig:
@@ -34,21 +34,61 @@ class Episode:
     """一局游戏的经历"""
     def __init__(self, player_id: int):
         self.states: List[State] = []
-        self.actions: List[Action] = []
+        self.actions: List[List[Action]] = []
+        self.probs: List[np.ndarray] = []
+        self.chosen_actions: List[Action] = []
         self.player_id = player_id
         self.reward: float = 0
     
     def __len__(self):
         return len(self.states)
     
-    def add_step(self, state: State, action: Action):
+    def add_step(
+            self, 
+            board: Board, 
+            state: State, 
+            action: Action,
+            probs: Optional[np.ndarray] = None):
         """添加一步经历"""
+        valid_moves = board.get_valid_moves()
         self.states.append(state)
-        self.actions.append(action)
+        self.actions.append(valid_moves)
+        if probs is not None:
+            self.probs.append(self._get_probs(board, valid_moves, probs))
+        else:
+            probs = np.zeros(board.size * board.size)
+            idx = action.x * board.size + action.y
+            probs[idx] = 1.0
+            self.probs.append(probs)
+        self.chosen_actions.append(action)
     
     def set_reward(self, reward: float):
         """设置最终奖励"""
         self.reward = reward
+
+    def _get_probs(
+            self, 
+            board: Board, 
+            actions: List[Action], 
+            probs: np.ndarray) -> np.ndarray:
+        # 创建一个完整的概率分布向量（所有位置）
+        full_probs = np.zeros(board.size * board.size)
+        
+        # 如果输入的probs是针对所有位置的
+        assert len(probs) == board.size * board.size, "概率分布长度不匹配"
+        if len(probs) == board.size * board.size:
+            full_probs = probs
+        # 如果输入的probs只包含合法动作的概率
+        else:
+            # 将合法动作的概率映射到对应位置
+            for action, prob in zip(actions, probs):
+                idx = action.x * board.size + action.y
+                full_probs[idx] = prob
+        
+        # 确保概率和为1
+        if full_probs.sum() > 0:
+            full_probs = full_probs / full_probs.sum()
+        return full_probs
 
 class ValueEstimator:
     """值函数估计器基类"""
@@ -66,7 +106,7 @@ class QLearningEstimator(ValueEstimator):
     def update(self, episode: Episode, board: Board):
         for i in range(len(episode.states) - 1):
             state = episode.states[i]
-            action = episode.actions[i]
+            action = episode.chosen_actions[i]
             next_state = episode.states[i + 1]
             reward = episode.reward
             self._update_q_value(state, action, reward, next_state, board)
@@ -76,9 +116,9 @@ class SarsaEstimator(ValueEstimator):
     def update(self, episode: Episode, board: Board):
         for i in range(len(episode.states) - 1):
             state = episode.states[i]
-            action = episode.actions[i]
+            action = episode.chosen_actions[i]
             next_state = episode.states[i + 1]
-            next_action = episode.actions[i + 1]
+            next_action = episode.chosen_actions[i + 1]
             reward = episode.reward
             
             # SARSA更新
@@ -95,7 +135,7 @@ class MonteCarloEstimator(ValueEstimator):
         self.visit_counts: Dict[Tuple[State, Action], int] = defaultdict(int)
     
     def update(self, episode: Episode, board: Board):
-        for state, action in zip(episode.states, episode.actions):
+        for state, action in zip(episode.states, episode.chosen_actions):
             key = (state, action)
             self.visit_counts[key] += 1
             count = self.visit_counts[key]
