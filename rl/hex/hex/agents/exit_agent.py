@@ -2,6 +2,7 @@ from __future__ import annotations
 import multiprocessing
 import sys
 import time
+import traceback
 from hex.log import ERROR, INFO, DEBUG
 from hex.agents.agent import Agent, create_random_agent
 from hex.config import ExitConfig, ExperimentConfig
@@ -118,10 +119,8 @@ class ExitAgent(Agent):
         self.temperature = config.temperature
         
         if hex_net_wrapper is None:
-            INFO(logger, "Creating network wrapper...")
             self.hex_net_wrapper = HexNetWrapper(config, board_size)
             self.hex_net_wrapper.start()
-            INFO(logger, "Network wrapper started")
         else:
             self.hex_net_wrapper = hex_net_wrapper
 
@@ -133,9 +132,11 @@ class ExitAgent(Agent):
             num_cores=1,
             player_id=player_id,
             name=name or f"{self.name}_player_{player_id}",
-            hex_net_wrapper=self.hex_net_wrapper
+            hex_net_wrapper=self.hex_net_wrapper.clone()
         )
-        
+
+        self.hex_net_wrapper.start_client()
+
         # 创建MCTS专家，使用主智能体的网络客户端
         new_agent.expert = MCTSPolicy(
             self.config.mcts_config,
@@ -175,10 +176,9 @@ class ExitAgent(Agent):
             result = self.hex_net_wrapper.train(batch)
             
             INFO(logger, f"Training iteration completed - "
-                        f"Policy Loss: {result['policy_loss']:.4f}, "
-                        f"Value Loss: {result['value_loss']:.4f}, "
-                        f"Total Loss: {result['total_loss']:.4f}, "
-                        f"costSec: {time.time() - start_time:.2f}s")
+                      f"Policy Loss: {result[0]:.4f}, "
+                      f"Value Loss: {result[1]:.4f}, "
+                      f"costSec: {time.time() - start_time:.2f}s")
         except Exception as e:
             ERROR(logger, f"Training error: {e}")
 
@@ -222,6 +222,10 @@ class ExitAgent(Agent):
     def _create_agent2(self) -> ExitAgent:
         """创建玩家2的智能体"""
         return self.clone(2)
+
+    def _create_random_agent(self) -> ExitAgent:
+        """创建随机对手的智能体"""
+        return create_random_agent(player_id=2)
 
     def train(self):
         """执行完整的训练过程"""
@@ -280,11 +284,12 @@ class ExitAgent(Agent):
                 num_cores=self.num_cores
             )
             
+           
             # 运行并行评估
             game_results = experiment_runner.run_experiments(
-                gameExperimentCreator=lambda: experiment,
-                agent1Creator=lambda: self.clone(1),  # 评估智能体总是玩家1
-                agent2Creator=lambda: create_random_agent(2),  # 随机对手总是玩家2
+                gameExperimentCreator=self._create_game_experiment,
+                agent1Creator=self._create_agent1,
+                agent2Creator=self._create_random_agent,
                 num_games=num_games,
                 parallel=self.config.parallel_eval
             )
@@ -292,10 +297,7 @@ class ExitAgent(Agent):
             # 统计胜率
             wins = sum(1 for result in game_results 
                       if result.has_winner() and result.get_winner() == 1)
-            win_rate = wins / len(game_results)
-            
-            INFO(logger, f"Evaluation completed. Win rate: {win_rate:.2%}")
-            return win_rate
+            return wins / len(game_results)
             
         finally:
             # 恢复原始状态
@@ -333,6 +335,7 @@ def create_exit_agent(
         agent.train()
     else:
         INFO(logger, f"Using pre-trained model from {model_path}")
+        pass
     
     return agent
 
@@ -355,6 +358,8 @@ if __name__ == "__main__":
     for i in range(10):
         # 评估并记录胜率
         win_rate = exit_agent.evaluate(experiment, 50)
+        INFO(logger, f"Evaluation completed. Win rate: {win_rate:.2%}")
+
         win_rates.append(win_rate)
         iterations.append(i)
         

@@ -50,7 +50,7 @@ class ExitConfig:
     """Expert Iteration配置"""
     def __init__(self):
         # 现有配置
-        self.num_iterations = 5
+        self.num_iterations = 1
         self.self_play_games = 20
         self.batch_size = 32
         self.memory_size = 10000

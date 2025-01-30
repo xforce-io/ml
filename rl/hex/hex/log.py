@@ -7,7 +7,6 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[logging.FileHandler('log/hex.log'), logging.StreamHandler(sys.stdout)])
 
-
 def INFO(logger :logging.Logger, log :str): logger.info(extractLogExpr(log))
 def DEBUG(logger :logging.Logger, log :str): logger.debug(extractLogExpr(log))
 def ERROR(logger :logging.Logger, log :str): logger.error(extractLogExpr(log))

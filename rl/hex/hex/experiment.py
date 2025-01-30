@@ -12,8 +12,6 @@ import multiprocessing
 
 from hex.log import DEBUG, ERROR, INFO, WARNING
 
-logger = logging.getLogger(__name__)
-
 class GameExperiment:
     """游戏实验"""
     def __init__(self):
@@ -53,7 +51,7 @@ class HexGameExperiment(GameExperiment):
             moves_count += 1
 
             if game_over:
-                INFO(logger, f"Game over, player {current_agent.player_id} wins, reward = {reward}, cost time = {time.time() - t0:.2f} seconds")
+                INFO(self.logger, f"Game over, player {current_agent.player_id} wins, reward = {reward}, cost time = {time.time() - t0:.2f} seconds")
                 experiences = current_agent.reward(reward, self.board)
                 other_player(current_agent).reward(-reward, self.board)
                 return GameResult(
@@ -68,7 +66,7 @@ class HexGameExperiment(GameExperiment):
         
         experiences = current_agent.reward(0, self.board)
         other_player(current_agent).reward(0, self.board)
-        INFO(logger, f"Game over, no winner, cost time = {time.time() - t0:.2f} seconds")
+        INFO(self.logger, f"Game over, no winner, cost time = {time.time() - t0:.2f} seconds")
         return GameResult(
             agent1_id=self.agent1.player_id,
             agent2_id=self.agent2.player_id,
@@ -86,30 +84,9 @@ class ExperimentRunner:
         self.statistics_rounds = statistics_rounds
         self.num_cores = num_cores or multiprocessing.cpu_count()
         self.timeout = 3600  # 每个批次的超时时间（秒）
-    
-    def _run_game_batch(
-            self, 
-            gameExperiment: HexGameExperiment,
-            num_games: int) -> List[GameResult]:
-        """运行一批游戏并返回结果列表"""
-        start_time = time.time()
-        results = []
-        
-        for no in range(num_games):
-            if time.time() - start_time > self.timeout:
-                WARNING(logger, "Batch timeout reached")
-                break
-            
-            try:
-                game_result = gameExperiment.play_game()
-                results.append(game_result)
-            except Exception as e:
-                ERROR(logger, f"Game error: {e} traceback: {traceback.format_exc()}")
-                continue
-        
-        INFO(logger, f"Batch game finished, cost time = {time.time() - start_time:.2f} seconds")
-        return results
 
+        self.logger = logging.getLogger(__name__)
+    
     def run_experiments(
             self, 
             gameExperimentCreator: Callable[[], GameExperiment],
@@ -125,25 +102,25 @@ class ExperimentRunner:
             experiment = gameExperimentCreator()
             experiment.set_agents(agent1Creator(), agent2Creator())
             results = self._run_game_batch(experiment, num_games)
-            INFO(logger, f"Run {num_games} games in single process, costSec[{time.time() - t0:.2f}]")
+            INFO(self.logger, f"Run {num_games} games in single process, costSec[{time.time() - t0:.2f}]")
             return results
 
         assert num_games % self.num_cores == 0, "num_games must be divisible by num_cores"
         games_per_process = num_games // self.num_cores
 
-        # 修改这部分代码，将对象创建移到子线程中
-        def run_batch():
-            experiment = gameExperimentCreator()
-            experiment.set_agents(agent1Creator(), agent2Creator())
-            return self._run_game_batch(experiment, games_per_process)
-
+        # 修改这部分代码，将对象创建移到子进程中
         all_results = []
-        # 使用ThreadPoolExecutor替代ProcessPoolExecutor
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.num_cores) as executor:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=self.num_cores) as executor:
             futures = []
             # 提交任务
             for _ in range(self.num_cores):
-                future = executor.submit(run_batch)
+                future = executor.submit(
+                    ExperimentRunner._run_batch, 
+                    gameExperimentCreator, 
+                    agent1Creator, 
+                    agent2Creator, 
+                    games_per_process, 
+                    self.timeout)
                 futures.append(future)
             
             # 等待所有任务完成或超时
@@ -160,22 +137,22 @@ class ExperimentRunner:
                         results = future.result()
                         all_results.extend(results)
                     except Exception as e:
-                        ERROR(logger, f"Future error: {e} traceback: {traceback.format_exc()}")
+                        ERROR(self.logger, f"Future error: {e} traceback: {traceback.format_exc()}")
                 
                 # 处理未完成的任务
                 if not_done:
-                    WARNING(logger, f"{len(not_done)} tasks did not complete")
+                    WARNING(self.logger, f"{len(not_done)} tasks did not complete")
                     for future in not_done:
                         future.cancel()
             
             except Exception as e:
-                ERROR(logger, f"Batch processing error: {e}")
+                ERROR(self.logger, f"Batch processing error: {e}")
             
             finally:
-                # 确保所有线程都被清理
+                # 确保所有进程都被清理
                 executor.shutdown(wait=False)
         
-        INFO(logger, f"Run {num_games} games in parallel, costSec[{time.time() - t0:.2f}]")
+        INFO(self.logger, f"Run {num_games} games in parallel, costSec[{time.time() - t0:.2f}]")
         return all_results
 
     def run_experiment_and_get_win_rates(
@@ -220,9 +197,55 @@ class ExperimentRunner:
                 win_rate2 = total_wins[1] / total_games
                 win_rates_history.append((win_rate1, win_rate2))
                 
-                INFO(logger, f"Round {round_start} - {round_start + self.statistics_rounds}: "
-                               f"{agent1_id} win rate = {win_rate1:.2f}, "
-                               f"{agent2_id} win rate = {win_rate2:.2f}, "
-                               f"cost time = {time.time() - start_time:.2f} seconds")
+                INFO(self.logger, f"Round {round_start} - {round_start + self.statistics_rounds}: "
+                      f"{agent1_id} win rate = {win_rate1:.2f}, "
+                      f"{agent2_id} win rate = {win_rate2:.2f}, "
+                      f"cost time = {time.time() - start_time:.2f} seconds")
             
         return win_rates_history
+
+    @staticmethod
+    def _run_batch(
+            gameExperimentCreator: Callable[[], GameExperiment],
+            agent1Creator: Callable[[], Agent],
+            agent2Creator: Callable[[], Agent],
+            games_per_process: int,
+            timeout: int) -> List[GameResult]:
+        logger = logging.getLogger(__name__)
+        try:
+            experiment = gameExperimentCreator()
+            experiment.set_agents(agent1Creator(), agent2Creator())
+            return ExperimentRunner._run_game_batch(
+                experiment, 
+                games_per_process, 
+                timeout,
+                logger)
+        except Exception as e:
+            ERROR(logger, f"Process error: {e} traceback: {traceback.format_exc()}")
+            return []
+
+    @staticmethod
+    def _run_game_batch(
+            gameExperiment: HexGameExperiment,
+            num_games: int,
+            timeout: int,
+            logger: logging.Logger) -> List[GameResult]:
+        """运行一批游戏并返回结果列表"""
+        start_time = time.time()
+        results = []
+        
+        for no in range(num_games):
+            if time.time() - start_time > timeout:
+                WARNING(logger, "Batch timeout reached")
+                break
+            
+            try:
+                game_result = gameExperiment.play_game()
+                results.append(game_result)
+            except Exception as e:
+                ERROR(logger, f"Game error: {e} traceback: {traceback.format_exc()}")
+                continue
+        
+        INFO(logger, f"Batch game finished, cost time = {time.time() - start_time:.2f} seconds")
+        return results
+

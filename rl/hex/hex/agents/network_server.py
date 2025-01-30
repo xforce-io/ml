@@ -8,7 +8,7 @@ from hex.config import ExitConfig, get_current_device
 from hex.hex import State
 from hex.log import ERROR, INFO, DEBUG, WARNING
 import logging
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import uvicorn
@@ -114,7 +114,6 @@ class HexNetTrainerPredictor:
 
     def predict(self, state: State) -> Tuple[np.ndarray, float]:
         """执行推理"""
-        DEBUG(logger, f"Predicting for state")
         with torch.no_grad():
             state_tensor = self.network._preprocess_state(state).unsqueeze(0).to(self.device)
             policy, value = self.network(state_tensor)
@@ -245,54 +244,70 @@ def run_server(
 
 class NetworkClient:
     """基于HTTP的神经网络客户端"""
-    def __init__(self, config: ExitConfig):
-        self.base_url = f"http://{config.network_server_host}:{config.network_server_port}"
+    def __init__(self, config: ExitConfig, port: Optional[int] = None):
+        self.config = config
+        self.port = port or config.network_server_port
+        self.base_url = f"http://127.0.0.1:{self.port}"
+        
+        # 使用连接池来复用连接
+        self.session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=100,  # 连接池大小
+            pool_maxsize=100,     # 最大连接数
+            max_retries=3,        # 重试次数
+            pool_block=True       # 连接池满时阻塞而不是抛出错误
+        )
+        self.session.mount('http://', adapter)
 
     def predict(self, state: State) -> Tuple[np.ndarray, float]:
         """请求推理结果"""
         try:
-            response = requests.post(
+            response = self.session.post(
                 f"{self.base_url}/predict",
                 json={
                     "board": state.board.tolist(),
                     "current_player": state.current_player
-                }
+                },
+                timeout=10  # 增加超时时间
             )
             response.raise_for_status()
             result = response.json()
             return np.array(result["action_probs"]), result["value"]
         except Exception as e:
-            ERROR(logger, f"Prediction error: {e}")
+            ERROR(logger, f"预测错误: {e}")
             raise
 
-    def train(self, batch: List[dict]) -> Dict[str, float]:
+    def train(self, batch: List[dict]) -> Tuple[float, float]:
         """请求训练"""
         try:
             data = {
                 "states": [
-                    {"board": exp["state"].board.tolist(),
-                     "current_player": exp["state"].current_player}
+                    {
+                        "board": exp["state"].board.tolist(),
+                        "current_player": exp["state"].current_player
+                    }
                     for exp in batch
                 ],
-                "action_probs": [exp["action_probs"].tolist() for exp in batch],
+                "action_probs": [exp["action_probs"].tolist() for exp in batch],  # 注意这里是 action_probs 而不是 action_prob
                 "rewards": [exp["reward"] for exp in batch]
             }
-            response = requests.post(f"{self.base_url}/train", json=data)
+            response = self.session.post(f"{self.base_url}/train", json=data)
             response.raise_for_status()
-            return response.json()
+            result = response.json()
+            return result["policy_loss"], result["value_loss"]  # 返回两个损失值
         except Exception as e:
-            ERROR(logger, f"Training error: {e}")
+            ERROR(logger, f"训练错误: {e}")
             raise
 
     def save(self, path: str) -> Dict[str, str]:
         """请求保存模型"""
-        response = requests.post(f"{self.base_url}/save", params={"path": path})
+        response = self.session.post(f"{self.base_url}/save", params={"path": path})
         response.raise_for_status()
         return response.json()
 
     def load(self, path: str) -> Dict[str, str]:
         """请求加载模型"""
-        response = requests.post(f"{self.base_url}/load", params={"path": path})
+        response = self.session.post(f"{self.base_url}/load", params={"path": path})
         response.raise_for_status()
         return response.json()
 
@@ -302,62 +317,96 @@ class HexNetWrapper:
         self.config = config
         self.board_size = board_size
         self.network_client = None
-        self.server_thread = None
+        self._server_thread = None
+        self._server_started = False
+        self._port = None  # 添加端口属性
+        
+    def __getstate__(self):
+        """自定义序列化行为"""
+        state = self.__dict__.copy()
+        # 移除不可序列化的对象
+        state['_server_thread'] = None
+        state['network_client'] = None
+        # 保留端口信息，这样新进程可以知道使用哪个端口
+        return state
+
+    def __setstate__(self, state):
+        """自定义反序列化行为"""
+        self.__dict__.update(state)
+        # 不要在这里启动服务器，让用户显式调用start()
+        self._server_thread = None
+        self.network_client = None
+        self._server_started = False
 
     def start(self):
         """启动服务器和客户端"""
+        if self._server_started:
+            return
+            
         INFO(logger, "Initializing network server...")
         
+        # 如果没有指定端口，则动态分配一个
+        if not self._port:
+            import socket
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(('', 0))
+                self._port = s.getsockname()[1]
+                
+        # 使用实例特定的端口
+        server_port = self._port
+        
         # 创建并启动服务器线程
-        self.server_thread = threading.Thread(
+        self._server_thread = threading.Thread(
             target=run_server,
             kwargs={
                 "config": self.config, 
                 "board_size": self.board_size,
                 "host": self.config.network_server_host,
-                "port": self.config.network_server_port
+                "port": server_port
             },
             daemon=True
         )
-        self.server_thread.start()
+        self._server_thread.start()
+        INFO(logger, f"Server started at {self.config.network_server_host}:{server_port}")
         
         # 创建客户端
-        self.network_client = NetworkClient(self.config)
+        self.network_client = NetworkClient(self.config, port=server_port)
         
-        # 等待服务器启动
+        # 等待服务器启动并进行健康检查
         import time
-        time.sleep(2)  # 给服务器一些启动时间
-        
-        # 尝试连接服务器
         max_retries = 5
         retry_interval = 1.0
         
+        time.sleep(retry_interval)
+
         for i in range(max_retries):
             try:
-                # 尝试发送一个简单的请求来检查服务器是否就绪
-                response = requests.get(f"http://{self.config.network_server_host}:{self.config.network_server_port}/health")
+                response = requests.get(
+                    f"http://{self.config.network_server_host}:{server_port}/health",
+                    timeout=5
+                )
                 if response.status_code == 200:
-                    INFO(logger, "Successfully connected to network server")
+                    self._server_started = True
                     break
-            except requests.exceptions.ConnectionError:
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
                 if i < max_retries - 1:
                     WARNING(logger, f"Failed to connect to server, retrying in {retry_interval}s...")
                     time.sleep(retry_interval)
                 else:
                     ERROR(logger, "Failed to connect to network server after multiple attempts")
                     raise RuntimeError("Network server initialization failed")
-        
-        # 如果存在预训练模型，则加载
-        if self.config.model_path and os.path.exists(self.config.model_path):
-            try:
-                result = self.network_client.load(self.config.model_path)
-                if result["status"] != "success":
-                    ERROR(logger, "Failed to load model")
-                    raise RuntimeError("Network server initialization failed")
-                INFO(logger, "Network server started successfully")
-            except Exception as e:
-                ERROR(logger, f"Error during server initialization: {e}")
-                raise RuntimeError("Network server initialization failed") from e
+    
+    def start_client(self):
+        if self.network_client is None:
+            self.network_client = NetworkClient(self.config, port=self._port)
+
+    def clone(self):
+        """克隆网络客户端"""
+        new_wrapper = HexNetWrapper(self.config, self.board_size)
+        new_wrapper._port = self._port  # 共享相同的端口
+        new_wrapper.network_client = NetworkClient(self.config, port=self._port)
+        new_wrapper._server_started = True  # 标记为已启动，因为我们共享同一个服务器
+        return new_wrapper
 
     def predict(self, state: State) -> Tuple[np.ndarray, float]:
         """请求推理结果"""

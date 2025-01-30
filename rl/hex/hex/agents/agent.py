@@ -14,10 +14,12 @@ logger = logging.getLogger(__name__)
 class ReplayMemory:
     """经验回放缓冲区"""
     def __init__(self, capacity: int):
-        self.memory = deque(maxlen=capacity)
-    
+        self.capacity = capacity
+        self.memory = None
+
     def append(self, experience: Dict[str, Any]):
         """添加经验"""
+        self._new_memory()
         self.memory.append(experience)
     
     def sample(self, batch_size: int) -> List[Dict[str, Any]]:
@@ -26,20 +28,26 @@ class ReplayMemory:
     
     def extend(self, experiences: List[Dict[str, Any]]):
         """添加多个经验"""
+        self._new_memory()
         self.memory.extend(experiences)
     
     def __len__(self) -> int:
-        return len(self.memory)
+        return len(self.memory) if self.memory else 0
     
     def pop(self):
         """移除指定位置的经验"""
-        return self.memory.pop()
+        return self.memory.pop() if self.memory else None
     
     def __getitem__(self, index) -> Any:
         """支持索引和切片访问"""
         if isinstance(index, slice):
             return list(self.memory)[index]
         return self.memory[index]
+
+    def _new_memory(self):
+        """创建新的经验回放缓冲区"""
+        if self.memory is None:
+            self.memory = deque(maxlen=self.capacity)
 
 class GameResult:
     """游戏结果"""
@@ -138,9 +146,7 @@ class Agent:
         Returns:
             float: 胜率
         """
-        INFO(logger, f"Starting evaluation over {num_games} games")
         wins = 0
-        
         for game in range(num_games):
             experiment.board.reset()
             # 与随机智能体对弈
@@ -152,7 +158,6 @@ class Agent:
                 wins += 1
             
         win_rate = wins / num_games
-        INFO(logger, f"Evaluation completed. Win rate: {win_rate:.2%}")
         return win_rate
 
 def create_random_agent(player_id: int) -> Agent:
