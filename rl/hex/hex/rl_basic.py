@@ -76,19 +76,12 @@ class Episode:
         
         # 如果输入的probs是针对所有位置的
         assert len(probs) == board.size * board.size, "概率分布长度不匹配"
-        if len(probs) == board.size * board.size:
-            full_probs = probs
-        # 如果输入的probs只包含合法动作的概率
-        else:
-            # 将合法动作的概率映射到对应位置
-            for action, prob in zip(actions, probs):
-                idx = action.x * board.size + action.y
-                full_probs[idx] = prob
+        for action in actions:
+            idx = action.x * board.size + action.y
+            full_probs[idx] = probs[idx]
         
-        # 确保概率和为1
-        if full_probs.sum() > 0:
-            full_probs = full_probs / full_probs.sum()
-        return full_probs
+        assert full_probs.sum() > 0, "概率分布和为0"
+        return full_probs / full_probs.sum()
 
 class ValueEstimator:
     """值函数估计器基类"""
@@ -276,4 +269,3 @@ class RLAlgorithm:
     def get_action(self, board: Board, state: State) -> Action:
         """获取动作"""
         return self.policy.get_action(board, state)
-

@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple
 from hex.agents.agent import Agent
 from hex.hex import Action, Board, State
 from hex.config import MCTSConfig
-from hex.log import INFO, ERROR
+from hex.log import DEBUG, INFO, ERROR
 from hex.rl_basic import Policy
 import numpy as np
 
@@ -63,25 +63,26 @@ class MCTSNode:
         return len(self.untried_actions) == 0
     
     def get_value(self, c: float = 1.414, rave_constant: float = 300) -> float:
-        """节点评估，结合先验概率和价值预测"""
+        """节点评估，使用UCT公式并结合先验概率和价值预测"""
         if self.visits == 0:
-            # 如果有价值预测，在未访问时使用它
             return self.value_prediction if self.value_prediction is not None else float('inf')
             
+        # 计算基础UCT分数
         mc_score = self.value / self.visits
+        
         # 如果有价值预测，将其与MC分数结合
         if self.value_prediction is not None:
             mc_score = 0.8 * mc_score + 0.2 * self.value_prediction
-            
-        # 加入先验概率的影响
+        
         exploration = c * self.prior_prob * math.sqrt(math.log(self.parent.visits) / self.visits)
         
         if not self.use_rave:
             return mc_score + exploration
-            
+        
         # RAVE评估
         beta = (rave_constant / (3 * self.visits + rave_constant)) ** 2
         rave_score = self.rave_value / (self.rave_visits + 1e-5)
+        
         return (1 - beta) * (mc_score + exploration) + beta * rave_score
     
     def get_children(self) -> Dict[Action, MCTSNode]:
@@ -109,7 +110,7 @@ class MCTSPolicy(Policy):
         self.prior_probs = None
         self.value_estimate = None
 
-    def search(self, board: Board, num_simulations: int = None) -> np.ndarray:
+    def search(self, board: Board, num_simulations) -> np.ndarray:
         """执行MCTS搜索并返回动作概率分布
         
         Args:
@@ -119,8 +120,7 @@ class MCTSPolicy(Policy):
         Returns:
             np.ndarray: 所有可能位置的动作概率
         """
-        if num_simulations is None:
-            num_simulations = self.config.simulations
+        DEBUG(logger, f"search, board: {board.get_state().board} num_simulations: {num_simulations}")
             
         root = MCTSNode(board.get_state(), use_rave=self.config.use_rave)
         root.untried_actions = board.get_valid_moves()
@@ -133,7 +133,7 @@ class MCTSPolicy(Policy):
         action_probs = self.get_action_probs(board)
         return action_probs
 
-    def select_action(self, board: Board, action_probs: np.ndarray, temperature: float = 1.0) -> Action:
+    def select_action(self, board: Board, action_probs: np.ndarray) -> Action:
         """根据动作概率选择动作"""
         valid_moves = board.get_valid_moves()
         
@@ -144,10 +144,6 @@ class MCTSPolicy(Policy):
             valid_probs.append(action_probs[idx])
         
         valid_probs = np.array(valid_probs)
-        
-        # 应用温度
-        if temperature != 1.0:
-            valid_probs = np.power(valid_probs, 1.0 / temperature)
         
         # 确保概率和为1
         valid_probs = valid_probs / np.sum(valid_probs)
@@ -165,22 +161,21 @@ class MCTSPolicy(Policy):
             action_idx = np.random.choice(len(valid_moves))
             return valid_moves[action_idx]
 
-    def search_and_select_action(self, board: Board, temperature: float = 1.0) -> Action:
+    def search_and_select_action(self, board: Board) -> Action:
         """执行搜索并选择动作
         
         Args:
             board: 当前棋盘状态
-            temperature: 温度参数
             
         Returns:
             Action: 选择的动作
         """
-        probs = self.search(board)
-        action = self.select_action(board, probs, temperature)
+        probs = self.search(board, self.config.simulations)
+        action = self.select_action(board, probs)
         self.reset()  # 重置搜索树
         return action
 
-    def get_action_probs(self, board: Board, temperature: float = 1.0) -> np.ndarray:
+    def get_action_probs(self, board: Board) -> np.ndarray:
         """获取基于访问次数的动作概率分布"""
         if not hasattr(self, 'root'):
             raise ValueError("Must call search() before get_action_probs()")
@@ -192,22 +187,13 @@ class MCTSPolicy(Policy):
             idx = action.x * board.size + action.y
             visits[idx] = child.visits
             
-        if temperature == 0:
-            # 选择访问次数最多的动作
-            best_idx = np.argmax(visits)
-            probs = np.zeros_like(visits)
-            probs[best_idx] = 1.0
-            return probs
-            
-        # 应用温度
-        if temperature != 1.0:
-            visits = np.power(visits, 1.0/temperature)
-            
         # 归一化得到概率分布
         total_visits = visits.sum()
         if total_visits > 0:
+            DEBUG(logger, f"visits: {visits}, total_visits: {total_visits}")
             probs = visits / total_visits
         else:
+            DEBUG(logger, f"no visits")
             # 如果没有访问记录，使用均匀分布
             valid_moves = board.get_valid_moves()
             probs = np.zeros_like(visits)
@@ -233,6 +219,7 @@ class MCTSPolicy(Policy):
         while not node.is_terminal() and node.is_fully_expanded():
             node = self._select_child(node)
             board.make_move(node.action)
+            DEBUG(logger, f"selection, action: {node.action}")
         
         # Expansion
         if not node.is_terminal() and not node.is_fully_expanded():
@@ -258,20 +245,17 @@ class MCTSPolicy(Policy):
             # 获取预测值
             probs, value = self.state_predictor.predict(node.state)
             
-            if random.random() < 0.3:  # 30%概率使用策略网络
-                # 获取所有未尝试动作的策略预测值
-                valid_probs = []
-                for act in node.untried_actions:
-                    idx = act.x * self.board_size + act.y
-                    valid_probs.append((probs[idx], idx, act))  # 添加idx作为稳定的第二排序键
-                
-                if valid_probs:  # 确保有有效动作
-                    # 按概率排序
-                    valid_probs.sort(key=lambda x: (-x[0], x[1]))  # 使用负概率实现降序，idx作为次要排序键
-                    # 确保top_k至少为1
-                    top_k = max(1, min(3, len(valid_probs) // 4))  # 取前25%的动作，但至少1个，最多3个
-                    action = valid_probs[random.randint(0, top_k-1)][2]  # 获取Action对象
-                    node.untried_actions.remove(action)
+            # 获取所有未尝试动作的策略预测值
+            valid_probs = []
+            for act in node.untried_actions:
+                idx = act.x * self.board_size + act.y
+                valid_probs.append((probs[idx], idx, act))  # (概率, 索引, 动作)
+            
+            if valid_probs:
+                valid_probs.sort(key=lambda x: (-x[0], x[1]))
+                top_k = max(1, min(3, len(valid_probs) // 4))
+                action = valid_probs[random.randint(0, top_k-1)][2]
+                node.untried_actions.remove(action)
         
         # 如果没有使用策略网络或随机选择不使用策略网络
         if action is None and node.untried_actions:  # 确保有未尝试的动作
@@ -282,6 +266,7 @@ class MCTSPolicy(Policy):
         if action is None:
             raise ValueError("No valid actions available for expansion")
         
+        DEBUG(logger, f"expand, action: {action}")
         board.make_move(action)
         child_state = board.get_state()
         child = MCTSNode(child_state, parent=node, action=action, 
@@ -527,18 +512,20 @@ class MCTSPolicy(Policy):
             current = current.parent
         
         # 反向传播
-        for node in path:
+        for path_node in path:
             # 更新节点统计
-            node.update(reward if node.state.current_player == self.player_id else -reward)
+            update_value = reward if path_node.state.current_player == self.player_id else -reward
+            path_node.update(update_value)
+            DEBUG(logger, f"backpropagate, action: {path_node.action}, update_value: {update_value}")
             
             # RAVE更新
-            if node.use_rave and node.parent:
+            if path_node.use_rave and path_node.parent:
                 # 获取父节点children的快照
-                children = node.parent.get_children()
+                children = path_node.parent.get_children()
                 for action, child in children.items():
                     if action in actions_seen:
                         child.update_rave(
-                            reward if node.state.current_player == self.player_id else -reward
+                            reward if path_node.state.current_player == self.player_id else -reward
                         )
             
             reward = -reward

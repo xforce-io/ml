@@ -1,9 +1,9 @@
 from __future__ import annotations
-import os
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.optim.lr_scheduler import LambdaLR
 from hex.config import ExitConfig, get_current_device
 from hex.hex import State
 from hex.log import ERROR, INFO, DEBUG, WARNING
@@ -14,46 +14,82 @@ from pydantic import BaseModel
 import uvicorn
 import threading
 import requests
+import math
+from functools import lru_cache
 
 logger = logging.getLogger(__name__)
 
 class HexNet(nn.Module):
     """Hex游戏的神经网络模型"""
-    def __init__(self, board_size: int, num_channels: int, policy_channels: int = 32):
+    def __init__(
+            self, 
+            board_size: int, 
+            num_channels: int, 
+            policy_channels: int = 32,
+            value_channels: int = 32,
+            dropout_rate: float = 0.1):
         super().__init__()
         self.board_size = board_size
+        self.dropout_rate = dropout_rate
         
         # 共享特征提取层
         self.conv1 = nn.Conv2d(3, num_channels, 3, padding=1)
+        self.bn1 = nn.BatchNorm2d(num_channels)
         self.conv2 = nn.Conv2d(num_channels, num_channels, 3, padding=1)
+        self.bn2 = nn.BatchNorm2d(num_channels)
         self.conv3 = nn.Conv2d(num_channels, num_channels, 3, padding=1)
+        self.bn3 = nn.BatchNorm2d(num_channels)
+        
+        # Dropout 层
+        self.dropout = nn.Dropout(dropout_rate)
+        self.dropout2d = nn.Dropout2d(dropout_rate)
         
         # 策略头
         self.policy_conv = nn.Conv2d(num_channels, policy_channels, 1)
-        self.policy_fc = nn.Linear(policy_channels * board_size * board_size, 
-                                 board_size * board_size)
+        self.policy_bn = nn.BatchNorm2d(policy_channels)
+        self.policy_fc1 = nn.Linear(policy_channels * board_size * board_size, 256)
+        self.policy_fc2 = nn.Linear(256, board_size * board_size)
         
         # 价值头
-        self.value_conv = nn.Conv2d(num_channels, policy_channels, 1)
-        self.value_fc1 = nn.Linear(policy_channels * board_size * board_size, 256)
+        self.value_conv = nn.Conv2d(num_channels, value_channels, 1)
+        self.value_bn = nn.BatchNorm2d(value_channels)
+        self.value_fc1 = nn.Linear(value_channels * board_size * board_size, 256)
         self.value_fc2 = nn.Linear(256, 1)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         # 特征提取
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = F.relu(self.conv3(x))
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = F.relu(x)
+        
+        x = self.conv2(x)
+        x = self.bn2(x)
+        x = F.relu(x)
+        
+        x = self.conv3(x)
+        x = self.bn3(x)
+        x = self.dropout2d(x)  # 只在最后一层卷积后使用 Dropout2D
+        x = F.relu(x)
         
         # 策略头
-        policy = F.relu(self.policy_conv(x))
-        policy = policy.view(-1, 32 * self.board_size * self.board_size)
-        policy = self.policy_fc(policy)
-        policy = F.softmax(policy, dim=1)
+        policy = self.policy_conv(x)
+        policy = self.policy_bn(policy)
+        policy = F.relu(policy)
+        policy = policy.view(-1, self.policy_conv.out_channels * self.board_size * self.board_size)
+        policy = self.dropout(policy)
+        policy = F.relu(self.policy_fc1(policy))
+        policy = self.dropout(policy)
+        policy = self.policy_fc2(policy)
+        policy = F.log_softmax(policy, dim=1)
         
         # 价值头
-        value = F.relu(self.value_conv(x))
-        value = value.view(-1, 32 * self.board_size * self.board_size)
+        value = self.value_conv(x)
+        value = self.value_bn(value)
+        value = F.relu(value)
+        value = value.view(-1, self.value_conv.out_channels * self.board_size * self.board_size)
+        value = self.dropout(value)
         value = F.relu(self.value_fc1(value))
+        value = self.dropout(value)
         value = torch.tanh(self.value_fc2(value))
         
         return policy, value
@@ -66,15 +102,18 @@ class HexNet(nn.Module):
 
     def _preprocess_state(self, state: State) -> torch.Tensor:
         """将状态转换为神经网络输入格式"""
-        current_player = state.current_player
-        opponent = 3 - current_player
+        state.standardize()
         
-        tensor = torch.zeros(3, self.board_size, self.board_size)
-        board = torch.tensor(state.board)
+        # 直接创建目标形状的张量，避免多次内存分配
+        tensor = torch.zeros(self.board_size, self.board_size, dtype=torch.float32)
         
-        tensor[0] = (board == current_player).float()
-        tensor[1] = (board == opponent).float()
-        tensor[2] = (board == 0).float()
+        # 一次性将numpy数组转换为tensor，并重用
+        board = torch.from_numpy(state.board)
+        
+        # 使用torch.where进行向量化操作，避免创建中间布尔张量
+        tensor[0] = torch.where(board == 1, 1.0, 0.0)
+        tensor[1] = torch.where(board == 2, 1.0, 0.0)
+        tensor[2] = torch.where(board == 0, 1.0, 0.0)
         
         return tensor
 
@@ -96,6 +135,25 @@ class TrainingResponse(BaseModel):
     value_loss: float
     total_loss: float
 
+def get_lr_scheduler(optimizer, warmup_steps: int, total_steps: int):
+    """
+    创建带有 linear warmup 和 cosine decay 的学习率调度器
+    
+    Args:
+        optimizer: PyTorch optimizer
+        warmup_steps: warmup 阶段的步数
+        total_steps: 总训练步数
+    """
+    def lr_lambda(current_step: int):
+        # warmup 阶段
+        if current_step < warmup_steps:
+            return float(current_step) / float(max(1, warmup_steps))
+        # decay 阶段
+        progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+
+    return LambdaLR(optimizer, lr_lambda)
+
 class HexNetTrainerPredictor:
     """神经网络训练和预测服务"""
     def __init__(
@@ -105,20 +163,40 @@ class HexNetTrainerPredictor:
             device: torch.device):
         self.network = network.to(device)
         self.device = device
+        
         self.optimizer = torch.optim.Adam(
             self.network.parameters(),
             lr=config.learning_rate,
             weight_decay=config.weight_decay
         )
+        
+        # 计算 warmup 步数和总步数
+        warmup_steps = int(config.num_steps * 0.1)  # 比如用总步数的 10% 作为 warmup
+        total_steps = config.num_steps
+        
+        # 使用 warmup + cosine decay 调度器
+        self.scheduler = get_lr_scheduler(
+            self.optimizer,
+            warmup_steps=warmup_steps,
+            total_steps=total_steps
+        )
+        
         self.network.eval()
+        self._predict_cache = lru_cache(maxsize=10000)(self._predict_uncached)
 
-    def predict(self, state: State) -> Tuple[np.ndarray, float]:
-        """执行推理"""
+    def _predict_uncached(self, zipped: bytes) -> Tuple[np.ndarray, float]:
+        """实际执行推理的未缓存方法"""
+        state = State.from_zipped(zipped)
         with torch.no_grad():
             state_tensor = self.network._preprocess_state(state).unsqueeze(0).to(self.device)
             policy, value = self.network(state_tensor)
             DEBUG(logger, f"Predicted probabilities: {policy.cpu().numpy().flatten()}, value: {value.item()}")
             return policy.cpu().numpy().flatten(), value.item()
+
+    def predict(self, state: State) -> Tuple[np.ndarray, float]:
+        """带缓存的推理方法"""
+        zipped = state.zip()
+        return self._predict_cache(zipped)
     
     def train(self, batch: List[dict]) -> Tuple[float, float]:
         """训练网络"""
@@ -140,20 +218,44 @@ class HexNetTrainerPredictor:
                 dtype=torch.float32
             ).to(self.device)
             
+            # 检查输入数据
+            if torch.isnan(states).any() or torch.isnan(target_policies).any() or torch.isnan(target_values).any():
+                raise ValueError("输入数据包含 NaN")
+            
+            # 确保目标策略是概率分布
+            assert torch.allclose(target_policies.sum(dim=1), torch.ones_like(target_policies.sum(dim=1))), "目标策略不是有效的概率分布"
+            
             # 前向传播
             predicted_policies, predicted_values = self.network(states)
             
-            # 计算损失
-            policy_loss = F.cross_entropy(predicted_policies, target_policies)
-            value_loss = F.mse_loss(predicted_values.squeeze(), target_values)
-            total_loss = policy_loss/0.9 + value_loss/3.2
+            # 计算策略损失
+            policy_loss = -(target_policies * predicted_policies).sum(dim=1).mean()
             
-            # 反向传播和优化
+            # 计算价值损失
+            value_loss = F.mse_loss(predicted_values.squeeze(), target_values)
+            
+            # 平衡策略和价值学习
+            total_loss = policy_loss + value_loss
+            
+            # 反向传播
             self.optimizer.zero_grad()
             total_loss.backward()
+            
+            # 梯度裁剪，防止梯度爆炸
+            torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=1.0)
+            
             self.optimizer.step()
             
+            # 更新学习率
+            self.scheduler.step()
+            
+            self._predict_cache.cache_clear()
+            
             return policy_loss.item(), value_loss.item()
+            
+        except Exception as e:
+            ERROR(logger, f"训练过程发生错误: {str(e)}")
+            raise
         finally:
             self.network.eval()
 
@@ -228,7 +330,8 @@ def run_server(
         network = HexNet(
             board_size=board_size,
             num_channels=config.num_channels,
-            policy_channels=config.policy_channels
+            policy_channels=config.policy_channels,
+            value_channels=config.value_channels
         ).to(device)
         
         # 创建服务器
@@ -258,9 +361,11 @@ class NetworkClient:
             pool_block=True       # 连接池满时阻塞而不是抛出错误
         )
         self.session.mount('http://', adapter)
+        self._predict_cache = lru_cache(maxsize=10000)(self._predict_uncached)
 
-    def predict(self, state: State) -> Tuple[np.ndarray, float]:
-        """请求推理结果"""
+    def _predict_uncached(self, zipped: bytes) -> Tuple[np.ndarray, float]:
+        """实际执行网络请求的未缓存方法"""
+        state = State.from_zipped(zipped)
         try:
             response = self.session.post(
                 f"{self.base_url}/predict",
@@ -268,7 +373,7 @@ class NetworkClient:
                     "board": state.board.tolist(),
                     "current_player": state.current_player
                 },
-                timeout=10  # 增加超时时间
+                timeout=10
             )
             response.raise_for_status()
             result = response.json()
@@ -276,6 +381,11 @@ class NetworkClient:
         except Exception as e:
             ERROR(logger, f"预测错误: {e}")
             raise
+
+    def predict(self, state: State) -> Tuple[np.ndarray, float]:
+        """带缓存的预测方法"""
+        zipped = state.zip()
+        return self._predict_cache(zipped)
 
     def train(self, batch: List[dict]) -> Tuple[float, float]:
         """请求训练"""

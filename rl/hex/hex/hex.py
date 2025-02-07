@@ -18,13 +18,66 @@ class State:
         self.board = board.copy()
         self.current_player = current_player
     
+    def clone(self):
+        """克隆棋盘状态"""
+        return State(self.board, self.current_player)
+    
+    def standardize(self):
+        if self.current_player == 2:
+            self.board = np.where(self.board != 0, 3 - self.board, self.board)
+            self.current_player = 1
+
+    def zip(self) -> bytes:
+        """将状态压缩为字节串
+        
+        将棋盘状态和当前玩家压缩为字节串。
+        棋盘使用 int32 类型，系统字节序。
+        玩家编号使用一个字节存储。
+        """
+        board_array = self.board.astype(np.int32)
+        board_bytes = board_array.tobytes()
+        player_bytes = self.current_player.to_bytes(1, 'little')
+        return board_bytes + player_bytes
+
+    @classmethod
+    def from_zipped(cls, zipped: bytes) -> 'State':
+        """从字节串恢复状态
+        
+        从压缩的字节串恢复棋盘状态和当前玩家。
+        假设棋盘数据使用 int32 类型存储。
+        
+        Args:
+            zipped: 压缩的字节串，包含棋盘数据(n*n*4字节)和玩家数据(1字节)
+        """
+        # 计算棋盘大小：总字节数减去玩家标记(1字节)，除以4(int32)，再开平方
+        total_board_bytes = len(zipped) - 1
+        if total_board_bytes % 4 != 0:
+            raise ValueError("无效的字节串长度")
+        
+        total_cells = total_board_bytes // 4
+        board_size = int(np.sqrt(total_cells))
+        
+        # 验证计算出的大小是否正确
+        if board_size * board_size * 4 + 1 != len(zipped):
+            raise ValueError("字节串长度与棋盘大小不匹配")
+        
+        # 解析棋盘数据
+        board = np.frombuffer(zipped[:-1], dtype=np.int32).reshape(board_size, board_size)
+        current_player = int.from_bytes(zipped[-1:], 'little')
+        
+        # 验证玩家标记的有效性
+        if current_player not in [1, 2]:
+            raise ValueError("无效的玩家标记")
+        
+        return cls(board.copy(), current_player)
+
     def __hash__(self):
         return hash((self.board.tobytes(), self.current_player))
     
     def __eq__(self, other):
         return (np.array_equal(self.board, other.board) and 
                 self.current_player == other.current_player)
-    
+
 class Board:
     """Hex游戏棋盘"""
     def __init__(self, size: int = 5):
@@ -64,10 +117,13 @@ class Board:
         
         return moves
     
+    def switch_player(self):
+        """切换玩家"""
+        self.current_player = 3 - self.current_player
+    
     def make_move(self, action: Action) -> Tuple[bool, float]:
         """执行一步动作，返回（是否游戏结束，奖励）"""
-        if not self.is_valid_move(action):
-            return False, -1.0
+        assert self.is_valid_move(action)
         
         self.board[action.x, action.y] = self.current_player
         
@@ -75,13 +131,13 @@ class Board:
         if self.check_win(self.current_player):
             return True, 1.0
         
-        # 切换玩家
-        self.current_player = 3 - self.current_player
+        # 检查是否平局（棋盘已满）
+        if len(self.get_valid_moves()) == 0:
+            return True, 0.0
         
-        # 检查对手是否已经获胜（在之前的回合）
-        if self.check_win(3 - self.current_player):
-            return True, -1.0  # 游戏结束，当玩家失败
-            
+        # 切换玩家
+        self.switch_player()
+        
         return False, 0.0  # 游戏继续
     
     def check_win(self, player: int) -> bool:

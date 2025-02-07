@@ -245,7 +245,7 @@ class MCTSOptimizer:
         experiment = HexGameExperiment(self.board_size)
         # 使用指定的核数
         runner = ExperimentRunner(
-            statistics_rounds=200,
+            statistics_rounds=100,
             num_cores=self.num_cores
         )
         

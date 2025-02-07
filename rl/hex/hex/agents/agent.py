@@ -37,6 +37,24 @@ class ReplayMemory:
     def pop(self):
         """移除指定位置的经验"""
         return self.memory.pop() if self.memory else None
+
+    def thanos(self):
+        """随机保留一半的经验"""
+        if self.memory:
+            # 计算要保留的数量
+            keep_size = len(self.memory) // 2
+            # 随机选择要保留的经验
+            keep_indices = random.sample(range(len(self.memory)), keep_size)
+            # 创建新的deque并保留选中的经验
+            new_memory = deque(maxlen=self.capacity)
+            for i in sorted(keep_indices):
+                new_memory.append(self.memory[i])
+            self.memory = new_memory
+
+    def clear(self):
+        """清空经验回放缓冲区"""
+        if self.memory:
+            self.memory.clear()
     
     def __getitem__(self, index) -> Any:
         """支持索引和切片访问"""
@@ -56,13 +74,13 @@ class GameResult:
             agent1_id: int, 
             agent2_id: int, 
             winner_id: int, 
-            experiences1: List[Dict[str, Any]],
+            experiences: List[Dict[str, Any]],
             moves_count: int,
         ):
         self.agent1_id :int = agent1_id
         self.agent2_id :int = agent2_id
         self.winner_id :int = winner_id
-        self.experiences1 :List[Dict[str, Any]] = experiences1
+        self.experiences :List[Dict[str, Any]] = experiences
         self.moves_count = moves_count
 
     def has_winner(self) -> bool:
@@ -78,7 +96,7 @@ class GameResult:
             f"agent1_id={self.agent1_id}, " \
             f"agent2_id={self.agent2_id}, " \
             f"winner_id={self.winner_id}, " \
-            f"experiences1={self.experiences1}, " \
+            f"experiences={len(self.experiences)}, " \
             f"moves_count={self.moves_count})"
     
 class Agent:
@@ -127,6 +145,7 @@ class Agent:
         experiences = []
         for state, actions, probs, action in zip(episode.states, episode.actions, episode.probs, episode.chosen_actions):
             experience = {
+                'player_id': self.player_id,
                 'state': state,
                 'actions': actions,
                 'action_probs': probs,
@@ -159,6 +178,10 @@ class Agent:
             
         win_rate = wins / num_games
         return win_rate
+
+    def _equal(self, other: Agent) -> bool:
+        """判断两个智能体是否相等"""
+        return self.player_id == other.player_id
 
 def create_random_agent(player_id: int) -> Agent:
     """创建随机智能体"""
