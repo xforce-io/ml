@@ -36,6 +36,7 @@ class Episode:
         self.states: List[State] = []
         self.actions: List[List[Action]] = []
         self.probs: List[np.ndarray] = []
+        self.export_probs: List[np.ndarray] = []
         self.chosen_actions: List[Action] = []
         self.player_id = player_id
         self.reward: float = 0
@@ -48,18 +49,21 @@ class Episode:
             board: Board, 
             state: State, 
             action: Action,
-            probs: Optional[np.ndarray] = None):
+            probs: Optional[np.ndarray] = None,
+            export_probs: Optional[np.ndarray] = None):
         """添加一步经历"""
         valid_moves = board.get_valid_moves()
         self.states.append(state)
         self.actions.append(valid_moves)
         if probs is not None:
             self.probs.append(self._get_probs(board, valid_moves, probs))
+            self.export_probs.append(export_probs)
         else:
             probs = np.zeros(board.size * board.size)
             idx = action.x * board.size + action.y
             probs[idx] = 1.0
             self.probs.append(probs)
+            self.export_probs.append(probs)
         self.chosen_actions.append(action)
     
     def set_reward(self, reward: float):
@@ -139,12 +143,12 @@ class MonteCarloEstimator(ValueEstimator):
 
 class Policy:
     """策略基类"""
-    def get_action(self, board: Board, state: State) -> Action:
+    def get_action(self, board: Board, state: State, cold_start: bool) -> Action:
         raise NotImplementedError
 
 class RandomPolicy(Policy):
     """随机策略"""
-    def get_action(self, board: Board, state: State) -> Action:
+    def get_action(self, board: Board, state: State, cold_start: bool) -> Action:
         return random.choice(board.get_valid_moves())
 
 class GreedyPolicy(Policy):
@@ -153,7 +157,7 @@ class GreedyPolicy(Policy):
         self.estimator = estimator
         self.epsilon = epsilon
     
-    def get_action(self, board: Board, state: State) -> Action:
+    def get_action(self, board: Board, state: State, cold_start: bool) -> Action:
         if random.random() < self.epsilon:
             return random.choice(board.get_valid_moves())
         
@@ -175,7 +179,7 @@ class UCBPolicy(Policy):
         self.c = c
         self.visit_counts = defaultdict(int)
         
-    def get_action(self, board: Board, state: State) -> Action:
+    def get_action(self, board: Board, state: State, cold_start: bool) -> Action:
         valid_moves = board.get_valid_moves()
         total_visits = sum(self.visit_counts[(state, a)] for a in valid_moves)
         
@@ -266,6 +270,6 @@ class RLAlgorithm:
         # 简单实现：使用当前Q值作为预测
         return self.estimator.get_q_value(state, action)
     
-    def get_action(self, board: Board, state: State) -> Action:
+    def get_action(self, board: Board, state: State, cold_start: bool) -> Action:
         """获取动作"""
-        return self.policy.get_action(board, state)
+        return self.policy.get_action(board, state, cold_start)

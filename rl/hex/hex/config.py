@@ -5,6 +5,9 @@ from typing import Optional
 
 import torch
 
+DEBUG_STATE = True
+DEBUG_MCTS = False
+
 @dataclass
 class ExperimentConfig:
     """实验全局配置"""
@@ -21,7 +24,6 @@ class ExperimentConfig:
     model_dir: str = "data/models"
     log_dir: str = "data/logs"
     
-    # 日志配置
     log_level: int = logging.INFO
     log_format: str = '%(asctime)s - %(levelname)s - %(message)s'
 
@@ -45,8 +47,8 @@ class ExperimentConfig:
 class MCTSConfig:
     """MCTS（蒙特卡洛树搜索）算法配置"""
     # 搜索参数
-    simulations: int = 200          # 每次决策的模拟次数
-    max_depth: int = 60            # 最大搜索深度
+    simulations: int = 100          # 每次决策的模拟次数
+    max_depth: int = 80            # 最大搜索深度
     c: float = 0.80               # UCB公式中的探索常数
     
     # RAVE参数
@@ -55,7 +57,7 @@ class MCTSConfig:
     
     # 策略参数
     selection_strategy: str = 'robust'  # 节点选择策略：'robust' 或 'max'
-    base_rollouts_per_leaf: int = 20   # 每个叶节点的基础rollout次数
+    base_rollouts_per_leaf: int = 5   # 每个叶节点的基础rollout次数
     
     # 其他
     name: str = "MCTS-Advanced"    # 算法名称
@@ -77,11 +79,11 @@ class ExitConfig:
     memory_size: int = 10000        # 经验回放缓冲区大小
     
     # 自对弈参数
-    parallel_self_play: bool = True # 是否并行进行自对弈
+    parallel_self_play: bool = False # 是否并行进行自对弈
     parallel_eval: bool = True      # 是否并行进行评估
     
     # 模型参数
-    num_channels: int = 128         # 卷积层通道数
+    num_channels: int = 256         # 卷积层通道数
     policy_channels: int = 32       # 策略头通道数
     value_channels: int = 32        # 价值头通道数
     use_network: bool = True        # 是否使用神经网络

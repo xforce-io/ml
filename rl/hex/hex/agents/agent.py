@@ -11,22 +11,64 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+class Experience:
+    """经验"""
+    def __init__(
+            self, 
+            player_id: int,
+            state: State, 
+            actions: List[Action],
+            action_probs: List[float],
+            export_probs: List[float],
+            action: Action, 
+            reward: float):
+        self.player_id = player_id
+        self.state = state
+        self.actions = actions
+        self.action_probs = action_probs
+        self.export_probs = export_probs
+        self.action = action
+        self.reward = reward
+
+    def paint(self) -> str:
+        """将棋盘状态绘制为 ASCII 字符画
+        
+        Returns:
+            str: ASCII 字符画表示的棋盘，使用:
+                ● 表示黑棋(玩家1)
+                ○ 表示白棋(玩家2)
+                · 表示空位
+                X 表示当前动作位置
+                (xx%) 表示该位置的动作概率
+        """
+        return self.state.board.paint(self.action, self.action_probs)
+
+    def __str__(self) -> str:
+        return f"Experience(" \
+            f"player_id={self.player_id}, " \
+            f"state={self.state}, " \
+            f"actions={self.actions}, " \
+            f"action_probs={self.action_probs}, " \
+            f"export_probs={self.export_probs}, " \
+            f"action={self.action}, " \
+            f"reward={self.reward})"
+            
 class ReplayMemory:
     """经验回放缓冲区"""
     def __init__(self, capacity: int):
         self.capacity = capacity
         self.memory = None
 
-    def append(self, experience: Dict[str, Any]):
+    def append(self, experience: Experience):
         """添加经验"""
         self._new_memory()
         self.memory.append(experience)
     
-    def sample(self, batch_size: int) -> List[Dict[str, Any]]:
+    def sample(self, batch_size: int) -> List[Experience]:
         """随机采样经验"""
         return random.sample(list(self.memory), batch_size)
     
-    def extend(self, experiences: List[Dict[str, Any]]):
+    def extend(self, experiences: List[Experience]):
         """添加多个经验"""
         self._new_memory()
         self.memory.extend(experiences)
@@ -42,7 +84,7 @@ class ReplayMemory:
         """随机保留一半的经验"""
         if self.memory:
             # 计算要保留的数量
-            keep_size = len(self.memory) // 2
+            keep_size = len(self.memory) // 3
             # 随机选择要保留的经验
             keep_indices = random.sample(range(len(self.memory)), keep_size)
             # 创建新的deque并保留选中的经验
@@ -73,14 +115,16 @@ class GameResult:
             self, 
             agent1_id: int, 
             agent2_id: int, 
+            first_agent_id: int,
             winner_id: int, 
-            experiences: List[Dict[str, Any]],
+            experiences: List[Experience],
             moves_count: int,
         ):
         self.agent1_id :int = agent1_id
         self.agent2_id :int = agent2_id
+        self.first_agent_id :int = first_agent_id
         self.winner_id :int = winner_id
-        self.experiences :List[Dict[str, Any]] = experiences
+        self.experiences :List[Experience] = experiences
         self.moves_count = moves_count
 
     def has_winner(self) -> bool:
@@ -117,20 +161,23 @@ class Agent:
         self.experience = ReplayMemory(memory_size)
         self.memory_size = memory_size
 
-    def choose_action(self, board: Board) -> Action:
+    def choose_action(self, board: Board, cold_start: bool) -> Action:
         """选择动作"""
         if self.policy is None:
             raise ValueError("Policy is not initialized")
             
-        state = board.get_state()
-        action = self.policy.get_action(board, state)
+        state = board.get_state(self.player_id)
+
+        assert state.current_player == self.player_id
+        
+        action = self.policy.get_action(board, state, cold_start)
         self.current_episode.add_step(
             board=board, 
             state=state, 
             action=action)
         return action
     
-    def reward(self, r: float, board: Optional[Board] = None) -> List[Dict[str, Any]]:
+    def reward(self, r: float, board: Optional[Board] = None) -> List[Experience]:
         """接收奖励并更新值函数"""
         self.current_episode.set_reward(r)
         experiences = self._store_episode(self.current_episode, r)
@@ -143,15 +190,17 @@ class Agent:
     def _store_episode(self, episode: Episode, reward: float):
         """存储一局游戏的经历"""
         experiences = []
-        for state, actions, probs, action in zip(episode.states, episode.actions, episode.probs, episode.chosen_actions):
-            experience = {
-                'player_id': self.player_id,
-                'state': state,
-                'actions': actions,
-                'action_probs': probs,
-                'action': action,
-                'reward': reward
-            }
+        for state, actions, probs, export_probs, action in zip(episode.states, episode.actions, episode.probs, episode.export_probs, episode.chosen_actions):
+            assert state.current_player == self.player_id
+            experience = Experience(
+                player_id=self.player_id,
+                state=state,
+                actions=actions,
+                action_probs=probs,
+                export_probs=export_probs,
+                action=action,
+                reward=reward
+            )
             experiences.append(experience)
         return experiences
     

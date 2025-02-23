@@ -31,34 +31,40 @@ class GameExperiment:
     
 class HexGameExperiment(GameExperiment):
     """游戏实验"""
-    def __init__(self, board_size: int = 5):
+    def __init__(self, board_size: int):
         super().__init__()
         self.board = Board(board_size)
     
-    def play_game(self) -> GameResult:
+    def play_game(self, cold_start: bool) -> GameResult:
         """进行一局游戏，返获胜步数"""
         t0 = time.time()
 
-        current_agent = random.choice([self.agent1, self.agent2])
-        self.board.reset(current_agent.player_id)
+        start_agent = random.choice([self.agent1, self.agent2])
+        current_agent = start_agent
+        self.board.reset()
         moves_count = 0
         MAX_MOVES = 100
 
         other_player = lambda agent: self.agent1 if agent == self.agent2 else self.agent2
         
         while moves_count < MAX_MOVES:
-            action = current_agent.choose_action(self.board)
-            game_over, reward = self.board.make_move(action)
+            action = current_agent.choose_action(self.board, cold_start)
+            game_over, reward = self.board.make_move(action, current_agent.player_id)
             moves_count += 1
 
             if game_over:
-                INFO(logger, f"Game over, player {current_agent.player_id} wins, reward = {reward}, cost time = {time.time() - t0:.2f} seconds")
-                experiences = current_agent.reward(reward, self.board)
-                other_player(current_agent).reward(-reward, self.board)
+                INFO(logger, f"Game over, start_agent = {start_agent.player_id}, winner_agent = {current_agent.player_id}, reward_of_agent1 = {1 if current_agent == self.agent1 else -1}, cost time = {time.time() - t0:.2f} seconds")
+                if current_agent == self.agent1:
+                    experiences = self.agent1.reward(1, self.board)
+                    self.agent2.reward(-1, self.board)
+                else:
+                    experiences = self.agent1.reward(-1, self.board)
+                    self.agent2.reward(1, self.board)
                 return GameResult(
                     agent1_id=self.agent1.player_id,
                     agent2_id=self.agent2.player_id,
-                    winner_id=current_agent.player_id if reward > 0 else other_player(current_agent).player_id,
+                    first_agent_id=start_agent.player_id,
+                    winner_id=current_agent.player_id,
                     experiences=experiences,
                     moves_count=moves_count
                 )
@@ -71,6 +77,7 @@ class HexGameExperiment(GameExperiment):
         return GameResult(
             agent1_id=self.agent1.player_id,
             agent2_id=self.agent2.player_id,
+            first_agent_id=start_agent.player_id,
             winner_id=None,
             experiences=experiences,
             moves_count=moves_count
@@ -92,7 +99,8 @@ class ExperimentRunner:
             agent1Creator: Callable[[], Agent],
             agent2Creator: Callable[[], Agent],
             num_games: int,
-            parallel: bool = True) -> List[GameResult]:
+            cold_start: bool=False,
+            parallel: bool=True) -> List[GameResult]:
         """运行实验"""
         t0 = time.time()
         
@@ -100,7 +108,7 @@ class ExperimentRunner:
             # 单进程执行的代码保持不变
             experiment = gameExperimentCreator()
             experiment.set_agents(agent1Creator(), agent2Creator())
-            results = self._run_game_batch(experiment, num_games, self.timeout)
+            results = self._run_game_batch(experiment, num_games, self.timeout, cold_start)
             INFO(logger, f"Run {num_games} games in single process, costSec[{time.time() - t0:.2f}]")
             return results
 
@@ -119,7 +127,8 @@ class ExperimentRunner:
                     agent1Creator, 
                     agent2Creator, 
                     games_per_process, 
-                    self.timeout)
+                    self.timeout,
+                    cold_start)
                 futures.append(future)
             
             # 等待所有任务完成或超时
@@ -160,6 +169,7 @@ class ExperimentRunner:
             agent1Creator: Callable[[], Agent],
             agent2Creator: Callable[[], Agent],
             num_games: int = 1000,
+            cold_start: bool = False,
             parallel: bool = True) -> List[Tuple[float, float]]:
         """并行运行实验"""
         win_rates_history = []
@@ -175,6 +185,7 @@ class ExperimentRunner:
                 agent1Creator,
                 agent2Creator,
                 num_games=self.statistics_rounds,
+                cold_start=cold_start,
                 parallel=parallel
             )
             
@@ -209,7 +220,8 @@ class ExperimentRunner:
             agent1Creator: Callable[[], Agent],
             agent2Creator: Callable[[], Agent],
             games_per_process: int,
-            timeout: int) -> List[GameResult]:
+            timeout: int,
+            cold_start: bool) -> List[GameResult]:
         logger = logging.getLogger(__name__)
         try:
             experiment = gameExperimentCreator()
@@ -217,7 +229,8 @@ class ExperimentRunner:
             return ExperimentRunner._run_game_batch(
                 experiment, 
                 games_per_process, 
-                timeout)
+                timeout,
+                cold_start)
         except Exception as e:
             ERROR(logger, f"Process error: {e} traceback: {traceback.format_exc()}")
             return []
@@ -226,7 +239,8 @@ class ExperimentRunner:
     def _run_game_batch(
             gameExperiment: HexGameExperiment,
             num_games: int,
-            timeout: int) -> List[GameResult]:
+            timeout: int,
+            cold_start: bool) -> List[GameResult]:
         """运行一批游戏并返回结果列表"""
         logger = logging.getLogger(__name__)
         start_time = time.time()
@@ -238,7 +252,7 @@ class ExperimentRunner:
                 break
             
             try:
-                game_result = gameExperiment.play_game()
+                game_result = gameExperiment.play_game(cold_start)
                 results.append(game_result)
             except Exception as e:
                 ERROR(logger, f"Game error: {e} traceback: {traceback.format_exc()}")

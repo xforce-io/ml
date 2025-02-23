@@ -1,4 +1,5 @@
 from __future__ import annotations
+from hex.agents.agent import Experience
 import numpy as np
 import torch
 import torch.nn as nn
@@ -102,10 +103,8 @@ class HexNet(nn.Module):
 
     def _preprocess_state(self, state: State) -> torch.Tensor:
         """将状态转换为神经网络输入格式"""
-        state.standardize()
-        
         # 直接创建目标形状的张量，避免多次内存分配
-        tensor = torch.zeros(self.board_size, self.board_size, dtype=torch.float32)
+        tensor = torch.zeros(3, self.board_size, self.board_size, dtype=torch.float32)
         
         # 一次性将numpy数组转换为tensor，并重用
         board = torch.from_numpy(state.board)
@@ -186,7 +185,10 @@ class HexNetTrainerPredictor:
 
     def _predict_uncached(self, zipped: bytes) -> Tuple[np.ndarray, float]:
         """实际执行推理的未缓存方法"""
-        state = State.from_zipped(zipped)
+        return self._predict_state(State.from_zipped(zipped))
+
+    def _predict_state(self, state: State) -> Tuple[np.ndarray, float]:
+        """实际执行推理的未缓存方法"""
         with torch.no_grad():
             state_tensor = self.network._preprocess_state(state).unsqueeze(0).to(self.device)
             policy, value = self.network(state_tensor)
@@ -195,9 +197,8 @@ class HexNetTrainerPredictor:
 
     def predict(self, state: State) -> Tuple[np.ndarray, float]:
         """带缓存的推理方法"""
-        zipped = state.zip()
-        return self._predict_cache(zipped)
-    
+        return self._predict_state(state)
+
     def train(self, batch: List[dict]) -> Tuple[float, float]:
         """训练网络"""
         self.network.train()
@@ -361,11 +362,8 @@ class NetworkClient:
             pool_block=True       # 连接池满时阻塞而不是抛出错误
         )
         self.session.mount('http://', adapter)
-        self._predict_cache = lru_cache(maxsize=10000)(self._predict_uncached)
 
-    def _predict_uncached(self, zipped: bytes) -> Tuple[np.ndarray, float]:
-        """实际执行网络请求的未缓存方法"""
-        state = State.from_zipped(zipped)
+    def predict(self, state: State) -> Tuple[np.ndarray, float]:
         try:
             response = self.session.post(
                 f"{self.base_url}/predict",
@@ -382,24 +380,19 @@ class NetworkClient:
             ERROR(logger, f"预测错误: {e}")
             raise
 
-    def predict(self, state: State) -> Tuple[np.ndarray, float]:
-        """带缓存的预测方法"""
-        zipped = state.zip()
-        return self._predict_cache(zipped)
-
-    def train(self, batch: List[dict]) -> Tuple[float, float]:
+    def train(self, batch: List[Experience]) -> Tuple[float, float]:
         """请求训练"""
         try:
             data = {
                 "states": [
                     {
-                        "board": exp["state"].board.tolist(),
-                        "current_player": exp["state"].current_player
+                        "board": exp.state.board.tolist(),
+                        "current_player": exp.state.current_player
                     }
                     for exp in batch
                 ],
-                "action_probs": [exp["action_probs"].tolist() for exp in batch],  # 注意这里是 action_probs 而不是 action_prob
-                "rewards": [exp["reward"] for exp in batch]
+                "action_probs": [exp.export_probs.tolist() for exp in batch],  # 注意这里是 action_probs 而不是 action_prob
+                "rewards": [exp.reward for exp in batch]
             }
             response = self.session.post(f"{self.base_url}/train", json=data)
             response.raise_for_status()
@@ -522,7 +515,7 @@ class HexNetWrapper:
         """请求推理结果"""
         return self.network_client.predict(state)
 
-    def train(self, batch: List[dict]) -> Tuple[float, float]:
+    def train(self, batch: List[Experience]) -> Tuple[float, float]:
         """请求训练"""
         return self.network_client.train(batch)
 

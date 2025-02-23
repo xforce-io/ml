@@ -1,10 +1,11 @@
 from __future__ import annotations
 import multiprocessing
+import random
 import sys
 import time
 from hex.log import ERROR, INFO, DEBUG
-from hex.agents.agent import Agent, create_random_agent
-from hex.config import ExitConfig, ExperimentConfig
+from hex.agents.agent import Agent, Experience, create_random_agent
+from hex.config import DEBUG_STATE, ExitConfig, ExperimentConfig
 from hex.hex import Action, Board, State
 from hex.agents.mcts_agent import MCTSPolicy, StatePredictor
 from hex.experiment import ExperimentRunner, HexGameExperiment, GameResult
@@ -34,6 +35,7 @@ class ExitAgent(Agent):
                  num_cores: int,
                  player_id: int = 1,
                  name: str = "ExIt",
+                 use_network: bool = True,
                  hex_net_wrapper: Optional[HexNetWrapper] = None):
         super().__init__(
             policy=None,
@@ -48,7 +50,7 @@ class ExitAgent(Agent):
         self.exp_config = exp_config
         self.board_size = board_size
         self.num_cores = num_cores
-        self.use_network = config.use_network
+        self.use_network = config.use_network and use_network
         
         if hex_net_wrapper is None:
             self.hex_net_wrapper = HexNetWrapper(config, board_size)
@@ -56,7 +58,11 @@ class ExitAgent(Agent):
         else:
             self.hex_net_wrapper = hex_net_wrapper
 
-    def clone(self, player_id: int, name: Optional[str] = None) -> ExitAgent:
+    def clone(
+            self, 
+            player_id: int, 
+            name: Optional[str] = None,
+            use_network: bool = True) -> ExitAgent:
         """创建当前智能体的副本"""
         new_agent = ExitAgent(
             exp_config=self.exp_config,
@@ -65,6 +71,7 @@ class ExitAgent(Agent):
             num_cores=self.num_cores,
             player_id=player_id,
             name=name or f"{self.name}_player_{player_id}",
+            use_network=use_network,
             hex_net_wrapper=self.hex_net_wrapper.clone()
         )
 
@@ -81,18 +88,23 @@ class ExitAgent(Agent):
         
         return new_agent
 
-    def choose_action(self, board: Board) -> Action:
+    def choose_action(self, board: Board, cold_start: bool) -> Action:
         """选择动作，结合神经网络的预测结果和MCTS搜索"""
-        state = board.get_state()
-        action = self.expert.search_and_select_action(board)
+        state = board.get_state(self.player_id)
+        probs = self.expert.search(board, self.config.mcts_config.simulations, not cold_start and self.use_network)
+        action = self.expert.select_action(board, probs)
+        self.expert.reset()  # 重置搜索树
+
         expert_probs = np.zeros(self.board_size * self.board_size)
         idx = action.x * self.board_size + action.y
         expert_probs[idx] = 1.0
+        
         self.current_episode.add_step(
             board=board, 
             state=state, 
             action=action, 
-            probs=expert_probs)
+            probs=probs,
+            export_probs=expert_probs)
         return action
     
     def train_step(self):
@@ -140,9 +152,7 @@ class ExitAgent(Agent):
             ERROR(logger, f"Error loading model: {e}")
             return False
 
-    def _process_game_result(self, game_result: GameResult) -> List[dict]:
-        for exp in game_result.experiences:
-            exp['state'].standardize()
+    def _process_game_result(self, game_result: GameResult) -> List[Experience]:
         return game_result.experiences
 
     def _create_game_experiment(self) -> HexGameExperiment:
@@ -155,15 +165,15 @@ class ExitAgent(Agent):
     
     def _create_agent2(self) -> ExitAgent:
         """创建玩家2的智能体"""
-        return self.clone(2)
+        return self.clone(2, use_network=False)
 
     def _create_random_agent(self) -> ExitAgent:
         """创建随机对手的智能体"""
         return create_random_agent(player_id=2)
 
-    def train_epoch(self):
+    def train_epoch(self, cold_start: bool):
         """执行完整的训练过程"""
-        INFO(logger, f"Starting epoch training with {self.config.num_steps_per_epoch} steps")
+        INFO(logger, f"Starting epoch training with {self.config.num_steps_per_epoch} steps cold_start[{cold_start}]")
         
         experiment_runner = ExperimentRunner(
             statistics_rounds=100,
@@ -173,7 +183,7 @@ class ExitAgent(Agent):
         self.experience.thanos()
         num_experiences_needed = self.config.batch_size * self.config.num_steps_per_epoch
         while len(self.experience) < num_experiences_needed:
-            self.accumulate_experience(experiment_runner)
+            self.accumulate_experience(experiment_runner, cold_start)
             INFO(logger, f"Accumulated experience: {len(self.experience)/num_experiences_needed}")
         
         for iteration in range(self.config.num_steps_per_epoch):
@@ -183,12 +193,13 @@ class ExitAgent(Agent):
                 model_path = os.path.join(self.config.model_dir, f"exit_agent_{iteration+1}.pth")
                 self.save_model(model_path)
             
-    def accumulate_experience(self, experiment_runner: ExperimentRunner):
+    def accumulate_experience(self, experiment_runner: ExperimentRunner, cold_start: bool):
         game_results = experiment_runner.run_experiments(
             gameExperimentCreator=self._create_game_experiment,
             agent1Creator=self._create_agent1,
             agent2Creator=self._create_agent2,
             num_games=self.exp_config.num_cores * 2,
+            cold_start=cold_start,
             parallel=self.config.parallel_self_play
         )
         
@@ -199,7 +210,15 @@ class ExitAgent(Agent):
                 if len(self.experience) >= self.config.memory_size:
                     self.experience.pop()
                 self.experience.append(exp)
-        
+
+        if DEBUG_STATE:
+            num_samples = min(10, len(game_results))
+            for game_result in game_results[-num_samples:]:
+                for exp in game_result.experiences:
+                    print(exp.paint())
+                    print("-" * 100)
+                print(f"winner: {game_result.winner_id} first_agent_id: {game_result.first_agent_id}")
+
     def evaluate(self, experiment: Any, num_games: int = 100) -> float:
         """评估智能体的性能"""
         assert num_games % self.num_cores == 0, "num_games must be divisible by num_cores"
@@ -225,6 +244,14 @@ class ExitAgent(Agent):
                 parallel=self.config.parallel_eval
             )
             
+            if DEBUG_STATE:
+                num_samples = min(10, len(game_results))
+                for game_result in game_results[-num_samples:]:
+                    for exp in game_result.experiences:
+                        print(exp.paint())
+                        print("-" * 100)
+                    print(f"winner: {game_result.winner_id} first_agent_id: {game_result.first_agent_id}")
+
             # 统计胜率
             wins = sum(1 for result in game_results 
                       if result.has_winner() and result.get_winner() == 1)
@@ -235,8 +262,8 @@ class ExitAgent(Agent):
             self.use_network = original_use_network
 
 def create_exit_agent(
-        board_size: int = 5, 
-        player_id: int = 1, 
+        board_size: int, 
+        player_id: int, 
         exp_config: Optional[ExperimentConfig] = None) -> ExitAgent:
     """创建并训练Expert Iteration智能体"""
     
@@ -265,7 +292,7 @@ def create_exit_agent(
     # 如果不使用预训练模型，进行训练
     if not use_network:
         INFO(logger, "No pre-trained model found. Starting training...")
-        agent.train_epoch()
+        agent.train_epoch(cold_start=True)
     else:
         INFO(logger, f"Using pre-trained model from {model_path}")
         pass
@@ -277,19 +304,26 @@ if __name__ == "__main__":
         multiprocessing.set_start_method('spawn')
 
     exp_config = ExperimentConfig(num_cores=10)
-    exit_agent = create_exit_agent(board_size=5, player_id=1, exp_config=exp_config)
+    exit_agent = create_exit_agent(
+        board_size=exp_config.board_size, 
+        player_id=1, 
+        exp_config=exp_config)
 
     win_rates = []
     iterations = []
+    exp_no = ''.join(random.choices('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=8))
     for i in range(exit_agent.config.num_epochs):
         win_rate = exit_agent.evaluate(None, exp_config.num_games_to_evaluate)
-        INFO(logger, f"Evaluation completed. Win rate: {win_rate:.2%}")
+        INFO(logger, f"Evaluation {exp_no} completed 0. Win rate: {win_rate:.2%}")
+
+        win_rate = exit_agent.evaluate(None, exp_config.num_games_to_evaluate)
+        INFO(logger, f"Evaluation {exp_no} completed 1. Win rate: {win_rate:.2%}")
 
         win_rates.append(win_rate)
         iterations.append(i)
         
         # 训练
-        exit_agent.train_epoch()
+        exit_agent.train_epoch(cold_start=False)
     
     # 绘制胜率变化图
     plt.figure(figsize=(10, 6))

@@ -1,7 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 @dataclass
 class Action:
@@ -21,12 +21,7 @@ class State:
     def clone(self):
         """克隆棋盘状态"""
         return State(self.board, self.current_player)
-    
-    def standardize(self):
-        if self.current_player == 2:
-            self.board = np.where(self.board != 0, 3 - self.board, self.board)
-            self.current_player = 1
-
+   
     def zip(self) -> bytes:
         """将状态压缩为字节串
         
@@ -80,25 +75,22 @@ class State:
 
 class Board:
     """Hex游戏棋盘"""
-    def __init__(self, size: int = 5):
+    def __init__(self, size: int):
         self.size = size
         self.board = np.zeros((size, size), dtype=int)
-        self.current_player = 1
         
-    def reset(self, current_player):
+    def reset(self):
         """重置棋盘"""
         self.board.fill(0)
-        self.current_player = current_player
     
     def set_state(self, state: State):
         """设置棋盘状态"""
         assert state.board.shape == self.board.shape, "棋盘大小不匹配"
         self.board = state.board.copy()
-        self.current_player = state.current_player
 
-    def get_state(self) -> State:
+    def get_state(self, player_id: int) -> State:
         """获取当前状态"""
-        return State(self.board, self.current_player)
+        return State(self.board, player_id)
     
     def is_valid_move(self, action: Action) -> bool:
         """检查动是否合法"""
@@ -117,26 +109,19 @@ class Board:
         
         return moves
     
-    def switch_player(self):
-        """切换玩家"""
-        self.current_player = 3 - self.current_player
-    
-    def make_move(self, action: Action) -> Tuple[bool, float]:
+    def make_move(self, action: Action, player_id: int) -> Tuple[bool, float]:
         """执行一步动作，返回（是否游戏结束，奖励）"""
         assert self.is_valid_move(action)
         
-        self.board[action.x, action.y] = self.current_player
+        self.board[action.x, action.y] = player_id
         
         # 检查当前玩家是否获胜
-        if self.check_win(self.current_player):
+        if self.check_win(player_id):
             return True, 1.0
         
         # 检查是否平局（棋盘已满）
         if len(self.get_valid_moves()) == 0:
             return True, 0.0
-        
-        # 切换玩家
-        self.switch_player()
         
         return False, 0.0  # 游戏继续
     
@@ -179,8 +164,55 @@ class Board:
     
     def copy(self) -> 'Board':
         """创建棋盘的深拷贝"""
-        new_board = Board.__new__(Board)  # 避免调用 __init__
-        new_board.size = self.size
-        new_board.board = self.board.copy()  # numpy的copy是高效的
-        new_board.current_player = self.current_player
+        new_board = Board(self.size) 
+        new_board.board = self.board.copy()
         return new_board
+
+    def paint(
+            self, 
+            action: Optional[Action] = None, 
+            action_probs: Optional[List[float]] = None) -> str:
+        """将棋盘状态绘制为 ASCII 字符画
+        
+        Returns:
+            str: ASCII 字符画表示的棋盘，使用:
+                ● 表示黑棋(玩家1)
+                ○ 表示白棋(玩家2)
+                · 表示空位
+                X 表示当前动作位置
+                (xx%) 表示该位置的动作概率
+        """
+        size = self.size
+        result = []
+        cell_width = 8  # 固定每个位置的宽度
+        
+        # 遍历每一行
+        for i in range(size):
+            # 添加行首缩进
+            row = " " * (i * cell_width // 2)
+            
+            # 添加每个位置的棋子和概率
+            for j in range(size):
+                # 获取该位置的概率
+                if action_probs is not None:
+                    prob = action_probs[i * size + j]
+                    prob_str = f"({int(prob * 100)}%)" if prob > 0.01 else " " * self.size
+                else:
+                    prob_str = " " * self.size
+                
+                # 如果是当前动作的位置，用 X 标记
+                if action is not None and i == action.x and j == action.y:
+                    cell = f"X{prob_str}"
+                elif self.board[i][j] == 1:
+                    cell = f"●{prob_str}"
+                elif self.board[i][j] == 2:
+                    cell = f"○{prob_str}"
+                else:
+                    cell = f"·{prob_str}"
+                
+                # 确保每个位置都是固定宽度
+                row += f"{cell:<{cell_width}}"
+            row += "\n"
+            result.append(row)
+        
+        return "\n".join(result)

@@ -3,11 +3,24 @@ from abc import abstractmethod
 import logging
 import math
 import random
-import time
 from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
+
+@dataclass
+class Action:
+    """动作"""
+    x: int
+    y: int
+    
+    def __hash__(self):
+        return hash((self.x, self.y))
+    
+    def __eq__(self, other):
+        return self.x == other.x and self.y == other.y
+
 from hex.agents.agent import Agent
-from hex.hex import Action, Board, State
-from hex.config import MCTSConfig
+from hex.hex import Board, State
+from hex.config import DEBUG_MCTS, MCTSConfig
 from hex.log import DEBUG, INFO, ERROR
 from hex.rl_basic import Policy
 import numpy as np
@@ -89,6 +102,43 @@ class MCTSNode:
         """安全地获取children"""
         return dict(self.children)  # 返回副本
 
+    def paint(self) -> str:
+        """以树形结构打印节点信息
+        
+        Returns:
+            str: 格式化的树形字符串
+        """
+        def _node_info(node: MCTSNode) -> str:
+            """生成节点信息字符串"""
+            if node.action:
+                action_str = f"({node.action.x},{node.action.y})"
+            else:
+                action_str = "root"
+            
+            value = node.value / node.visits if node.visits > 0 else 0
+            info = f"{action_str} p:{node.state.current_player} v:{value:.3f} n:{node.visits}"
+            
+            if node.use_rave and node.rave_visits > 0:
+                rave_value = node.rave_value / node.rave_visits
+                info += f" rv:{rave_value:.3f} rn:{node.rave_visits}"
+            
+            return info
+        
+        def _paint_tree(node: MCTSNode, prefix: str = "", is_last: bool = True) -> str:
+            """递归生成树形结构字符串"""
+            result = prefix
+            result += "└── " if is_last else "├── "
+            result += _node_info(node) + "\n"
+            
+            children = list(node.children.values())
+            for i, child in enumerate(children):
+                extension = "    " if is_last else "│   "
+                result += _paint_tree(child, prefix + extension, i == len(children)-1)
+            
+            return result
+        
+        return _paint_tree(self)
+
 class StatePredictor:
     @abstractmethod
     def predict(self, state: State) -> Tuple[np.ndarray, float]:
@@ -107,10 +157,11 @@ class MCTSPolicy(Policy):
         self.num_threads = num_threads
         self.player_id = player_id
         self.state_predictor = state_predictor
+        self.use_network = False
         self.prior_probs = None
         self.value_estimate = None
 
-    def search(self, board: Board, num_simulations) -> np.ndarray:
+    def search(self, board: Board, num_simulations, use_network: bool) -> np.ndarray:
         """执行MCTS搜索并返回动作概率分布
         
         Args:
@@ -120,48 +171,48 @@ class MCTSPolicy(Policy):
         Returns:
             np.ndarray: 所有可能位置的动作概率
         """
-        DEBUG(logger, f"search, board: {board.get_state().board} num_simulations: {num_simulations}")
+        DEBUG(logger, f"search, board: {board.get_state(self.player_id).board} num_simulations: {num_simulations}")
+
+        self.use_network = use_network
             
-        root = MCTSNode(board.get_state(), use_rave=self.config.use_rave)
+        root = MCTSNode(board.get_state(self.player_id), use_rave=self.config.use_rave)
         root.untried_actions = board.get_valid_moves()
         
-        for _ in range(num_simulations):
+        for i in range(num_simulations):
+            if DEBUG_MCTS:
+                print(f"\nsimulation {i}/{num_simulations}")
+
             board_copy = board.copy()
             self._run_simulation(root, board_copy)
-            
+
         self.root = root
-        action_probs = self.get_action_probs(board)
-        return action_probs
+        return self.get_action_probs(board)
 
     def select_action(self, board: Board, action_probs: np.ndarray) -> Action:
-        """根据动作概率选择动作"""
+        """选择概率最大的动作
+        
+        Args:
+            board: 当前棋盘
+            action_probs: 所有位置的动作概率分布
+            
+        Returns:
+            选择的动作
+            
+        Note:
+            如果概率分布无效，会回退到随机选择
+        """
         valid_moves = board.get_valid_moves()
-        
+        if not valid_moves:
+            raise ValueError("No valid moves available")
+            
         # 提取合法动作的概率
-        valid_probs = []
-        for move in valid_moves:
-            idx = move.x * board.size + move.y
-            valid_probs.append(action_probs[idx])
+        move_probs = [(move, action_probs[move.x * board.size + move.y]) 
+                     for move in valid_moves]
         
-        valid_probs = np.array(valid_probs)
-        
-        # 确保概率和为1
-        valid_probs = valid_probs / np.sum(valid_probs)
-        
-        # 如果概率和太小，使用均匀分布
-        if np.sum(valid_probs) < 1e-6:
-            valid_probs = np.ones(len(valid_moves)) / len(valid_moves)
-        
-        try:
-            action_idx = np.random.choice(len(valid_moves), p=valid_probs)
-            return valid_moves[action_idx]
-        except ValueError as e:
-            # 如果仍然出现问题，记录详细信息并使用均匀分布
-            ERROR(logger, f"Error in select_action: {e}, valid_probs={valid_probs}, sum={np.sum(valid_probs)}")
-            action_idx = np.random.choice(len(valid_moves))
-            return valid_moves[action_idx]
+        best_move, best_prob = max(move_probs, key=lambda x: x[1])
+        return best_move
 
-    def search_and_select_action(self, board: Board) -> Action:
+    def search_and_select_action(self, board: Board, use_network: bool) -> Action:
         """执行搜索并选择动作
         
         Args:
@@ -170,7 +221,7 @@ class MCTSPolicy(Policy):
         Returns:
             Action: 选择的动作
         """
-        probs = self.search(board, self.config.simulations)
+        probs = self.search(board, self.config.simulations, use_network)
         action = self.select_action(board, probs)
         self.reset()  # 重置搜索树
         return action
@@ -212,24 +263,49 @@ class MCTSPolicy(Policy):
 
     # 以下是私有方法...
     def _run_simulation(self, root: MCTSNode, board: Board) -> None:
-        """运行单次模拟"""
-        node = root
+        """运行单次模拟
         
-        # Selection
+        在树搜索过程中，玩家会交替行动。每一层的节点代表当前行动玩家的选择。
+        """
+        node = root
+        current_player = self.player_id
+        
+        if DEBUG_MCTS:
+            print(f"before selection, board \n {board.paint(node.action)}")
+        
+        # Selection - 在每一层交替玩家
         while not node.is_terminal() and node.is_fully_expanded():
             node = self._select_child(node)
-            board.make_move(node.action)
-            DEBUG(logger, f"selection, action: {node.action}")
+            board.make_move(node.action, current_player)
+
+            if DEBUG_MCTS:
+                print(f"selection, player {current_player}, action: {node.action}")
+
+            current_player = 3 - current_player  # 切换玩家
         
-        # Expansion
+        # Expansion - 扩展时使用当前玩家
         if not node.is_terminal() and not node.is_fully_expanded():
             node = self._expand(node, board)
+
+            if DEBUG_MCTS:
+                print(f"expand, player {current_player}, action: {node.action}")
+
+            current_player = 3 - current_player  # 切换玩家
+
+            if DEBUG_MCTS:
+                print(f"after expand, board \n {board.paint(node.action)}")
         
-        # Simulation
-        reward = self._simulate(board)
+        # Simulation - 从当前玩家开始模拟
+        reward = self._simulate(board, current_player)
+
+        if DEBUG_MCTS:
+            print(f"after simulate, reward: {reward}")
         
-        # Backpropagation
+        # Backpropagation - 注意reward的视角是相对于root玩家的
         self._backpropagate(node, reward)
+
+        if DEBUG_MCTS:
+            print(f"after backpropagation, root \n {root.paint()}")
     
     def _select_child(self, node: MCTSNode) -> MCTSNode:
         """选子节点"""
@@ -237,11 +313,20 @@ class MCTSPolicy(Policy):
                   key=lambda n: n.get_value(self.config.c, self.config.rave_constant))
     
     def _expand(self, node: MCTSNode, board: Board) -> MCTSNode:
-        """扩展节点，结合策略网络和随机选择"""
+        """扩展节点，结合策略网络和随机选择
+        
+        Args:
+            node: 要扩展的节点
+            board: 当前棋盘状态
+            
+        Returns:
+            MCTSNode: 新创建的子节点
+        """
         action = None
         value = None
+        current_player = node.state.current_player  # 获取当前玩家
         
-        if self.state_predictor is not None:
+        if self.use_network and self.state_predictor is not None:
             # 获取预测值
             probs, value = self.state_predictor.predict(node.state)
             
@@ -267,8 +352,12 @@ class MCTSPolicy(Policy):
             raise ValueError("No valid actions available for expansion")
         
         DEBUG(logger, f"expand, action: {action}")
-        board.make_move(action)
-        child_state = board.get_state()
+        board.make_move(action, current_player)  # 使用当前玩家执行动作
+        
+        # 创建新的子节点状态时，需要从对手的视角创建
+        next_player = 3 - current_player  # 切换到下一个玩家
+        child_state = board.get_state(next_player)  # 从下一个玩家的视角创建状态
+        
         child = MCTSNode(child_state, parent=node, action=action, 
                          use_rave=self.config.use_rave)
         
@@ -292,22 +381,27 @@ class MCTSPolicy(Policy):
         
         return self.config.base_rollouts_per_leaf + additional_rollouts
     
-    def _simulate(self, board: Board) -> float:
-        """使用神经网络的价值估计替代随机模拟"""
-        # 如果有神经网络的价值估计，直接使用
-        if self.state_predictor is not None:
-            _, value = self.state_predictor.predict(board.get_state())
+    def _simulate(self, board: Board, current_player: int) -> float:
+        """使用神经网络的价值估计或随机模拟
+        
+        Args:
+            board: 当前棋盘状态
+            current_player: 当前模拟的玩家
+            
+        Returns:
+            float: 从根节点玩家(self.player_id)视角看的奖励值
+        """
+        if self.use_network and self.state_predictor is not None:
+            _, value = self.state_predictor.predict(board.get_state(self.player_id))
             return value
             
-        # 否则回退到传统的随机模拟
         rewards = []
         original_board = board.copy()
         rollouts = self._get_dynamic_rollouts(original_board)
         
-        # 对同一个叶子节点进行多次rollout
         for _ in range(rollouts):
             board = original_board.copy()
-            original_player = board.current_player
+            player = current_player  # 从当前玩家开始模拟
             depth = 0
             
             while depth < self.config.max_depth:
@@ -316,28 +410,35 @@ class MCTSPolicy(Policy):
                     rewards.append(0.0)
                     break
                 
-                # 动态调整策略
-                if depth < self.config.max_depth // 4:  # 开局阶段
+                if depth < self.config.max_depth // 4:
                     action = self._get_early_game_action(board, valid_moves)
-                elif depth < self.config.max_depth * 3 // 4:  # 中局阶段
+                elif depth < self.config.max_depth * 3 // 4:
                     if random.random() < 0.8:
-                        action = self._get_heuristic_action(board, valid_moves)
+                        action = self._get_heuristic_action(board, valid_moves, player)
                     else:
                         action = random.choice(valid_moves)
-                else:  # 残局阶段
-                    action = self._get_endgame_action(board, valid_moves)
+                else:
+                    action = self._get_endgame_action(board, valid_moves, player)
                 
-                game_over, reward = board.make_move(action)
+                game_over, reward = board.make_move(action, player)
                 depth += 1
                 
                 if game_over:
-                    rewards.append(1.0 if board.current_player == original_player else -1.0)
+                    # 计算相对于根节点玩家的奖励
+                    # 如果当前玩家赢了，那么reward就是1.0，这时我们需要判断这个玩家是否是根节点玩家
+                    final_reward = 1.0 if player == self.player_id else -1.0
+                    rewards.append(final_reward)
                     break
+                
+                player = 3 - player  # 切换玩家
             
             if depth >= self.config.max_depth:
-                rewards.append(self._evaluate_position(board, original_player))
+                position_value = self._evaluate_position(board, self.player_id)
+                # 如果当前玩家不是根节点玩家，需要翻转评估值
+                if current_player != self.player_id:
+                    position_value = -position_value
+                rewards.append(position_value)
         
-        # 返回所有rollout的平均奖励
         return sum(rewards) / len(rewards)
     
     def _get_early_game_action(self, board: Board, valid_moves: List[Action]) -> Action:
@@ -351,19 +452,19 @@ class MCTSPolicy(Policy):
         
         if center_moves:
             return random.choice(center_moves)
-        return self._get_heuristic_action(board, valid_moves)
+        return self._get_heuristic_action(board, valid_moves, self.player_id)
     
-    def _get_endgame_action(self, board: Board, valid_moves: List[Action]) -> Action:
+    def _get_endgame_action(self, board: Board, valid_moves: List[Action], current_player: int) -> Action:
         """残局策略"""
         best_score = float('-inf')
         best_moves = []
         
         for move in valid_moves:
             temp_board = board.copy()
-            temp_board.make_move(move)
+            temp_board.make_move(move, current_player)
             
             # 评估这步棋后的局面
-            score = self._evaluate_position(temp_board, board.current_player)
+            score = self._evaluate_position(temp_board, current_player)
             
             if score > best_score:
                 best_score = score
@@ -373,7 +474,7 @@ class MCTSPolicy(Policy):
         
         return random.choice(best_moves)
     
-    def _get_heuristic_action(self, board: Board, valid_moves: List[Action]) -> Action:
+    def _get_heuristic_action(self, board: Board, valid_moves: List[Action], current_player: int) -> Action:
         """改进的启发式动作选择"""
         move_scores = []
         center = board.size // 2
@@ -381,9 +482,9 @@ class MCTSPolicy(Policy):
         for move in valid_moves:
             # 计算多个特征
             distance_to_center = abs(move.x - center) + abs(move.y - center)
-            connectivity_score = self._evaluate_connectivity(board, move)
-            bridge_score = self._evaluate_bridge_potential(board, move)
-            blocking_score = self._evaluate_blocking_value(board, move)
+            connectivity_score = self._evaluate_connectivity(board, move, current_player)
+            bridge_score = self._evaluate_bridge_potential(board, move, current_player)
+            blocking_score = self._evaluate_blocking_value(board, move, current_player)
             
             # 综合评分
             score = (0.3 * connectivity_score +
@@ -398,16 +499,15 @@ class MCTSPolicy(Policy):
         top_k = max(3, len(move_scores) // 4)  # 动态调整选择范围
         return random.choice([m[1] for m in move_scores[:top_k]])
     
-    def _evaluate_connectivity(self, board: Board, move: Action) -> float:
+    def _evaluate_connectivity(self, board: Board, move: Action, current_player: int) -> float:
         """评估一个动作的连接价值"""
-        # 检查周围8个方向的己方棋子数量
         directions = [(0,1), (1,0), (-1,0), (0,-1), (1,-1), (-1,1)]
         connected_pieces = 0
         
         for dx, dy in directions:
             x, y = move.x + dx, move.y + dy
             if (0 <= x < board.size and 0 <= y < board.size and 
-                board.board[x, y] == board.current_player):
+                board.board[x, y] == current_player):
                 connected_pieces += 1
         
         return connected_pieces / len(directions)
@@ -499,7 +599,12 @@ class MCTSPolicy(Policy):
         return connectivity / (board.size * board.size * 6)  # 归一化
     
     def _backpropagate(self, node: MCTSNode, reward: float):
-        """改进的反向传播"""
+        """反向传播
+        
+        Args:
+            node: 开始反向传播的节点
+            reward: 从根节点玩家视角看到的奖励值
+        """
         path = []
         actions_seen = set()
         
@@ -513,22 +618,16 @@ class MCTSPolicy(Policy):
         
         # 反向传播
         for path_node in path:
-            # 更新节点统计
-            update_value = reward if path_node.state.current_player == self.player_id else -reward
-            path_node.update(update_value)
-            DEBUG(logger, f"backpropagate, action: {path_node.action}, update_value: {update_value}")
+            # 直接更新节点统计，不需要翻转reward
+            path_node.update(reward)
+            DEBUG(logger, f"backpropagate, action: {path_node.action}, reward: {reward}")
             
             # RAVE更新
             if path_node.use_rave and path_node.parent:
-                # 获取父节点children的快照
                 children = path_node.parent.get_children()
                 for action, child in children.items():
                     if action in actions_seen:
-                        child.update_rave(
-                            reward if path_node.state.current_player == self.player_id else -reward
-                        )
-            
-            reward = -reward
+                        child.update_rave(reward)
 
     def _calculate_potential_winning_paths(self, board: Board, player: int) -> float:
         """计算潜在获胜路径数"""
@@ -561,51 +660,42 @@ class MCTSPolicy(Policy):
         
         return paths / size  # 归一化
 
-    def _evaluate_bridge_potential(self, board: Board, move: Action) -> float:
+    def _evaluate_bridge_potential(self, board: Board, move: Action, current_player: int) -> float:
         """评估形成桥接潜力"""
         directions = [(0,1), (1,0), (-1,0), (0,-1), (1,-1), (-1,1)]
         bridge_score = 0.0
-        player = board.current_player
         
-        # 检查每对相对方向
         for i in range(len(directions)//2):
             dir1, dir2 = directions[i], directions[i+len(directions)//2]
             x1, y1 = move.x + dir1[0], move.y + dir1[1]
             x2, y2 = move.x + dir2[0], move.y + dir2[1]
             
-            # 检查两个方向是否都在棋盘内
             if (0 <= x1 < board.size and 0 <= y1 < board.size and
                 0 <= x2 < board.size and 0 <= y2 < board.size):
-                # 如果两个方向都是己方棋子，增加桥接分数
-                if (board.board[x1, y1] == player and 
-                    board.board[x2, y2] == player):
+                if (board.board[x1, y1] == current_player and 
+                    board.board[x2, y2] == current_player):
                     bridge_score += 1.0
-                # 如果一个方向是己方棋子，另一个方向是空位
-                elif ((board.board[x1, y1] == player and board.board[x2, y2] == 0) or
-                      (board.board[x1, y1] == 0 and board.board[x2, y2] == player)):
+                elif ((board.board[x1, y1] == current_player and board.board[x2, y2] == 0) or
+                      (board.board[x1, y1] == 0 and board.board[x2, y2] == current_player)):
                     bridge_score += 0.5
                 
         return bridge_score / len(directions)
 
-    def _evaluate_blocking_value(self, board: Board, move: Action) -> float:
+    def _evaluate_blocking_value(self, board: Board, move: Action, current_player: int) -> float:
         """评估一个动作的阻挡价值"""
-        opponent = 3 - board.current_player
+        opponent = 3 - current_player
         blocking_score = 0.0
         
-        # 临时模拟这步棋
         temp_board = board.copy()
-        temp_board.board[move.x, move.y] = board.current_player
+        temp_board.board[move.x, move.y] = current_player
         
-        # 检查这步棋是否阻断了对手的连接
         directions = [(0,1), (1,0), (-1,0), (0,-1), (1,-1), (-1,1)]
         for dx1, dy1 in directions:
             x1, y1 = move.x + dx1, move.y + dy1
             if not (0 <= x1 < board.size and 0 <= y1 < board.size):
                 continue
                 
-            # 检查是否有对手的棋子
             if board.board[x1, y1] == opponent:
-                # 检查这个手棋子的连接情况
                 connected_count = 0
                 for dx2, dy2 in directions:
                     x2, y2 = x1 + dx2, y1 + dy2
@@ -614,7 +704,6 @@ class MCTSPolicy(Policy):
                         board.board[x2, y2] == opponent):
                         connected_count += 1
                 
-                # 如果这步棋切断了对手的连接，增加阻挡分
                 if connected_count > 0:
                     blocking_score += connected_count / len(directions)
         
@@ -661,3 +750,45 @@ def create_mcts_agent(config: MCTSConfig, player_id: int) -> MCTSAgent:
         player_id=player_id,
         name=config.name
     )
+
+if __name__ == "__main__":
+    import numpy as np
+    from hex.hex import Board, Action
+    from hex.config import MCTSConfig
+    import logging
+    
+    # 配置日志
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+
+    random.seed(1)
+    
+    board = Board(size=5)
+    
+    player1_moves = [
+        (0, 2), (1, 1), (1, 2), (1, 4), (2, 2), (2, 4), (3, 0), (3,4), (4, 0),
+    ]
+    
+    player2_moves = [
+        (0, 0), (0, 1), (2, 0), (2, 3), (3, 1), (3, 3), (4, 1), (4, 2), (4, 3)
+    ]
+    
+    # 放置棋子
+    for move in player1_moves:
+        board.make_move(Action(*move), 1)
+    for move in player2_moves:
+        board.make_move(Action(*move), 2)
+        
+    # 创建MCTS策略
+    config = MCTSConfig()
+    policy = MCTSPolicy(config=config, board_size=5, player_id=1)
+    
+    # 执行搜索
+    action_probs = policy.search(board, num_simulations=config.simulations, use_network=False)
+    action = policy.select_action(board, action_probs)
+    
+    # 打印棋盘状态
+    print("\n当前棋盘状态:")
+    print(board.paint(action, action_probs))
