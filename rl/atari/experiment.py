@@ -5,6 +5,9 @@ import numpy as np
 from collections import deque
 from typing import Dict, List, Any, Optional, Tuple
 import gymnasium as gym  # 确保导入gymnasium
+import cProfile
+import pstats
+from io import StringIO
 
 from wrappers.atari_wrappers import makeAtari
 from algos.base_algo import Algo
@@ -95,30 +98,32 @@ class Experiment:
     
     def _runEpisode(self, deterministic: bool = False, 
                     training: bool = False, global_step: int = 0) -> Tuple[float, int, float, int]:
-        """运行单个 episode 并返回结果
-        
-        Args:
-            deterministic (bool): 是否使用确定性策略
-            training (bool): 是否为训练模式
-            global_step (int): 当前的全局步数 (仅在训练时使用)
-            
-        Returns:
-            Tuple[float, int, float, int]: (总奖励, episode长度, 平均损失, 更新后的全局步数)
-        """
+        """运行单个 episode 并返回结果"""
         episode_reward = 0.0
         episode_length = 0
         episode_loss = 0.0
-        done = False
         
         # 重置环境
         state, _ = self.env.reset(seed=self.config.general.RANDOM_SEED + global_step)
         
+        # 性能统计
+        total_env_time = 0
+        total_action_time = 0
+        total_learn_time = 0
+        episode_start = time.time()
+        
+        done = False
+        
         while not done:
             # 选择动作
+            t0 = time.time()
             action = self.algo.selectAction(state, deterministic=deterministic)
+            total_action_time += time.time() - t0
             
             # 执行动作
+            t0 = time.time()
             next_state, reward, terminated, truncated, _ = self.env.step(action)
+            total_env_time += time.time() - t0
             
             # 累加当前 episode 指标
             episode_reward += reward
@@ -132,12 +137,23 @@ class Experiment:
                 self.algo.updateStepsDone(global_step)
                 
                 # 执行学习步骤
+                t0 = time.time()
                 loss = self.algo.learn(state, action, reward, next_state, done)
+                total_learn_time += time.time() - t0
                 if loss is not None:
                     episode_loss += loss
             
             # 更新状态
             state = next_state
+
+        # 每1000步输出一次性能统计
+        if global_step % 1000 < episode_length:
+            total_time = time.time() - episode_start
+            print(f"\n性能统计:")
+            print(f"环境执行时间占比: {total_env_time/total_time*100:.1f}%")
+            print(f"动作选择时间占比: {total_action_time/total_time*100:.1f}%")
+            print(f"学习时间占比: {total_learn_time/total_time*100:.1f}%")
+            print(f"每步平均耗时: {total_time/episode_length*1000:.1f}ms")
         
         # 计算平均损失
         avg_loss = episode_loss / episode_length if episode_length > 0 else 0.0

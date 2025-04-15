@@ -294,7 +294,7 @@ class MCTSPolicy(Policy):
 
             if DEBUG_MCTS:
                 print(f"after expand, board \n {board.paint(node.action)}")
-        
+
         # Simulation - 从当前玩家开始模拟
         reward = self._simulate(board, current_player)
 
@@ -410,22 +410,14 @@ class MCTSPolicy(Policy):
                     rewards.append(0.0)
                     break
                 
-                if depth < self.config.max_depth // 4:
-                    action = self._get_early_game_action(board, valid_moves)
-                elif depth < self.config.max_depth * 3 // 4:
-                    if random.random() < 0.8:
-                        action = self._get_heuristic_action(board, valid_moves, player)
-                    else:
-                        action = random.choice(valid_moves)
-                else:
-                    action = self._get_endgame_action(board, valid_moves, player)
+                # 根据游戏阶段使用不同的策略
+                action = self._get_simulation_action(board, valid_moves, player, depth)
                 
                 game_over, reward = board.make_move(action, player)
                 depth += 1
                 
                 if game_over:
                     # 计算相对于根节点玩家的奖励
-                    # 如果当前玩家赢了，那么reward就是1.0，这时我们需要判断这个玩家是否是根节点玩家
                     final_reward = 1.0 if player == self.player_id else -1.0
                     rewards.append(final_reward)
                     break
@@ -434,71 +426,202 @@ class MCTSPolicy(Policy):
             
             if depth >= self.config.max_depth:
                 position_value = self._evaluate_position(board, self.player_id)
-                # 如果当前玩家不是根节点玩家，需要翻转评估值
-                if current_player != self.player_id:
-                    position_value = -position_value
                 rewards.append(position_value)
         
         return sum(rewards) / len(rewards)
     
-    def _get_early_game_action(self, board: Board, valid_moves: List[Action]) -> Action:
-        """开局策略"""
-        # 先选择中心区域
-        center = board.size // 2
-        center_moves = []
-        for move in valid_moves:
-            if abs(move.x - center) <= 1 and abs(move.y - center) <= 1:
-                center_moves.append(move)
+    def _get_simulation_action(self, board: Board, valid_moves: List[Action], player: int, depth: int) -> Action:
+        """获取模拟阶段的动作
         
-        if center_moves:
-            return random.choice(center_moves)
-        return self._get_heuristic_action(board, valid_moves, self.player_id)
-    
-    def _get_endgame_action(self, board: Board, valid_moves: List[Action], current_player: int) -> Action:
-        """残局策略"""
-        best_score = float('-inf')
-        best_moves = []
-        
-        for move in valid_moves:
-            temp_board = board.copy()
-            temp_board.make_move(move, current_player)
+        Args:
+            board: 当前棋盘
+            valid_moves: 有效动作列表
+            player: 当前玩家
+            depth: 当前深度
             
-            # 评估这步棋后的局面
-            score = self._evaluate_position(temp_board, current_player)
-            
-            if score > best_score:
-                best_score = score
-                best_moves = [move]
-            elif score == best_score:
-                best_moves.append(move)
-        
-        return random.choice(best_moves)
-    
-    def _get_heuristic_action(self, board: Board, valid_moves: List[Action], current_player: int) -> Action:
-        """改进的启发式动作选择"""
+        Returns:
+            Action: 选择的动作
+        """
+        # 计算每个动作的分数
         move_scores = []
-        center = board.size // 2
-        
         for move in valid_moves:
-            # 计算多个特征
-            distance_to_center = abs(move.x - center) + abs(move.y - center)
-            connectivity_score = self._evaluate_connectivity(board, move, current_player)
-            bridge_score = self._evaluate_bridge_potential(board, move, current_player)
-            blocking_score = self._evaluate_blocking_value(board, move, current_player)
+            score = 0.0
             
-            # 综合评分
-            score = (0.3 * connectivity_score +
-                    0.3 * bridge_score +
-                    0.3 * blocking_score -
-                    0.1 * (distance_to_center / board.size))
+            # 1. 连接性评分 (0-1)
+            connectivity = self._evaluate_connectivity(board, move, player)
+            score += 0.25 * connectivity
+            
+            # 2. 到目标的距离评分 (0-1)
+            distance_score = self._evaluate_distance_to_goal(board, move, player)
+            score += 0.2 * distance_score
+            
+            # 3. 桥接潜力评分 (0-1)
+            bridge_score = self._evaluate_bridge_potential(board, move, player)
+            score += 0.2 * bridge_score
+            
+            # 4. 阻挡对手评分 (0-1)
+            blocking_score = self._evaluate_blocking_value(board, move, player)
+            score += 0.15 * blocking_score
+            
+            # 5. 虚桥评分 (0-1) - 新增
+            virtual_bridge_score = self._evaluate_virtual_bridge(board, move, player)
+            score += 0.1 * virtual_bridge_score
+            
+            # 6. 中心控制评分 (0-1) - 新增
+            center_score = self._evaluate_center_control(board, move, player)
+            score += 0.1 * center_score
+            
+            # 添加随机扰动以增加多样性，但减小扰动范围
+            score += random.uniform(0, 0.05)
             
             move_scores.append((score, move))
         
-        # 选择最佳动作
-        move_scores.sort(key=lambda x: x[0], reverse=True)
-        top_k = max(3, len(move_scores) // 4)  # 动态调整选择范围
-        return random.choice([m[1] for m in move_scores[:top_k]])
+        # 根据游戏阶段和局面特征选择不同的策略
+        empty_spaces = len(valid_moves)
+        total_spaces = board.size * board.size
+        game_progress = 1.0 - (empty_spaces / total_spaces)
+        
+        if game_progress < 0.3:  # 开局阶段
+            # 选择分数最高的几个动作中的一个
+            move_scores.sort(key=lambda x: x[0], reverse=True)
+            top_k = max(1, min(3, len(move_scores) // 4))
+            return move_scores[random.randint(0, top_k-1)][1]
+        elif game_progress < 0.7:  # 中盘
+            # 使用 softmax 选择，温度参数随游戏进程调整
+            temperature = 1.0 - game_progress
+            scores = np.array([s[0] for s in move_scores])
+            scores = np.exp(scores / temperature - np.max(scores) / temperature)
+            probs = scores / scores.sum()
+            idx = np.random.choice(len(move_scores), p=probs)
+            return move_scores[idx][1]
+        else:  # 残局
+            # 更倾向于选择最优动作
+            move_scores.sort(key=lambda x: x[0], reverse=True)
+            if random.random() < 0.8:  # 80%概率选择最佳动作
+                return move_scores[0][1]
+            else:  # 20%概率从前三个动作中随机选择
+                top_k = min(3, len(move_scores))
+                return move_scores[random.randint(0, top_k-1)][1]
     
+    def _evaluate_distance_to_goal(self, board: Board, move: Action, player: int) -> float:
+        """评估一个动作到目标边的距离
+        
+        Returns:
+            float: 归一化的距离分数 (0-1)，越近分数越高
+        """
+        size = board.size
+        if player == 1:  # 横向连接
+            distance = size - 1 - move.y
+        else:  # 纵向连接
+            distance = size - 1 - move.x
+        
+        # 归一化到 0-1 范围，并反转使得距离越近分数越高
+        return 1.0 - (distance / (size - 1))
+    
+    def _evaluate_blocking_value(self, board: Board, move: Action, player: int) -> float:
+        """评估一个动作的阻挡价值
+        
+        Returns:
+            float: 阻挡价值分数 (0-1)
+        """
+        opponent = 3 - player
+        opponent_pieces = 0
+        total_neighbors = 0
+        
+        # 检查周围六个方向
+        directions = [(0,1), (1,0), (-1,0), (0,-1), (1,-1), (-1,1)]
+        for dx, dy in directions:
+            x, y = move.x + dx, move.y + dy
+            if 0 <= x < board.size and 0 <= y < board.size:
+                total_neighbors += 1
+                if board.board[x, y] == opponent:
+                    opponent_pieces += 1
+        
+        return opponent_pieces / max(1, total_neighbors)
+    
+    def _backpropagate(self, node: MCTSNode, reward: float):
+        """反向传播
+        
+        Args:
+            node: 开始反向传播的节点
+            reward: 从根节点玩家视角看到的奖励值
+        """
+        path = []
+        actions_seen = set()
+        
+        # 收集路径
+        current = node
+        while current is not None:
+            path.append(current)
+            if current.action:
+                actions_seen.add(current.action)
+            current = current.parent
+        
+        # 反向传播
+        for path_node in path:
+            # 直接更新节点统计，不需要翻转reward
+            path_node.update(reward)
+            DEBUG(logger, f"backpropagate, action: {path_node.action}, reward: {reward}")
+            
+            # RAVE更新
+            if path_node.use_rave and path_node.parent:
+                children = path_node.parent.get_children()
+                for action, child in children.items():
+                    if action in actions_seen:
+                        child.update_rave(reward)
+
+    def _calculate_potential_winning_paths(self, board: Board, player: int) -> float:
+        """计算潜在获胜路径数"""
+        size = board.size
+        paths = 0
+        
+        if player == 1:  # 横向连接
+            for x in range(size):
+                empty_count = 0
+                player_count = 0
+                for y in range(size):
+                    if board.board[x, y] == 0:
+                        empty_count += 1
+                    elif board.board[x, y] == player:
+                        player_count += 1
+                # 如果这条路径上没有对手的棋子
+                if player_count + empty_count == size:
+                    paths += (1.0 + 0.5 * player_count)  # 已有棋子越多，分数越高
+        else:  # 纵向连接
+            for y in range(size):
+                empty_count = 0
+                player_count = 0
+                for x in range(size):
+                    if board.board[x, y] == 0:
+                        empty_count += 1
+                    elif board.board[x, y] == player:
+                        player_count += 1
+                if player_count + empty_count == size:
+                    paths += (1.0 + 0.5 * player_count)
+        
+        return paths / size  # 归一化
+
+    def _evaluate_bridge_potential(self, board: Board, move: Action, current_player: int) -> float:
+        """评估形成桥接潜力"""
+        directions = [(0,1), (1,0), (-1,0), (0,-1), (1,-1), (-1,1)]
+        bridge_score = 0.0
+        
+        for i in range(len(directions)//2):
+            dir1, dir2 = directions[i], directions[i+len(directions)//2]
+            x1, y1 = move.x + dir1[0], move.y + dir1[1]
+            x2, y2 = move.x + dir2[0], move.y + dir2[1]
+            
+            if (0 <= x1 < board.size and 0 <= y1 < board.size and
+                0 <= x2 < board.size and 0 <= y2 < board.size):
+                if (board.board[x1, y1] == current_player and 
+                    board.board[x2, y2] == current_player):
+                    bridge_score += 1.0
+                elif ((board.board[x1, y1] == current_player and board.board[x2, y2] == 0) or
+                      (board.board[x1, y1] == 0 and board.board[x2, y2] == current_player)):
+                    bridge_score += 0.5
+                
+        return bridge_score / len(directions)
+
     def _evaluate_connectivity(self, board: Board, move: Action, current_player: int) -> float:
         """评估一个动作的连接价值"""
         directions = [(0,1), (1,0), (-1,0), (0,-1), (1,-1), (-1,1)]
@@ -597,117 +720,92 @@ class MCTSPolicy(Policy):
                             connectivity += 1
         
         return connectivity / (board.size * board.size * 6)  # 归一化
-    
-    def _backpropagate(self, node: MCTSNode, reward: float):
-        """反向传播
+
+    def _evaluate_virtual_bridge(self, board: Board, move: Action, player: int) -> float:
+        """评估形成虚桥的潜力
         
-        Args:
-            node: 开始反向传播的节点
-            reward: 从根节点玩家视角看到的奖励值
+        虚桥是一种特殊的连接模式，可以保证连接的形成
         """
-        path = []
-        actions_seen = set()
+        directions = [(0,1), (1,0), (-1,0), (0,-1), (1,-1), (-1,1)]
+        virtual_bridges = 0
+        total_patterns = 0
         
-        # 收集路径
-        current = node
-        while current is not None:
-            path.append(current)
-            if current.action:
-                actions_seen.add(current.action)
-            current = current.parent
+        # 检查所有可能的虚桥模式
+        for i in range(len(directions)):
+            for j in range(i + 1, len(directions)):
+                dir1, dir2 = directions[i], directions[j]
+                x1, y1 = move.x + dir1[0], move.y + dir1[1]
+                x2, y2 = move.x + dir2[0], move.y + dir2[1]
+                
+                if (0 <= x1 < board.size and 0 <= y1 < board.size and
+                    0 <= x2 < board.size and 0 <= y2 < board.size):
+                    total_patterns += 1
+                    
+                    # 检查是否形成虚桥模式
+                    if (board.board[x1, y1] == 0 and board.board[x2, y2] == 0 and
+                        self._check_virtual_bridge_pattern(board, move, (x1,y1), (x2,y2), player)):
+                        virtual_bridges += 1
         
-        # 反向传播
-        for path_node in path:
-            # 直接更新节点统计，不需要翻转reward
-            path_node.update(reward)
-            DEBUG(logger, f"backpropagate, action: {path_node.action}, reward: {reward}")
-            
-            # RAVE更新
-            if path_node.use_rave and path_node.parent:
-                children = path_node.parent.get_children()
-                for action, child in children.items():
-                    if action in actions_seen:
-                        child.update_rave(reward)
+        return virtual_bridges / max(1, total_patterns)
 
-    def _calculate_potential_winning_paths(self, board: Board, player: int) -> float:
-        """计算潜在获胜路径数"""
+    def _check_virtual_bridge_pattern(self, board: Board, move: Action, 
+                                    pos1: Tuple[int,int], pos2: Tuple[int,int], 
+                                    player: int) -> bool:
+        """检查是否形成有效的虚桥模式"""
+        # 检查两个位置之间是否能形成有效的连接
+        x1, y1 = pos1
+        x2, y2 = pos2
+        
+        # 检查是否有对手的棋子阻挡
+        opponent = 3 - player
+        if any(board.board[x, y] == opponent 
+               for x, y in [(x1,y1), (x2,y2)]):
+            return False
+        
+        # 检查是否与己方棋子相邻
+        directions = [(0,1), (1,0), (-1,0), (0,-1), (1,-1), (-1,1)]
+        has_friendly_neighbor = False
+        
+        for dx, dy in directions:
+            x, y = move.x + dx, move.y + dy
+            if (0 <= x < board.size and 0 <= y < board.size and 
+                board.board[x, y] == player):
+                has_friendly_neighbor = True
+                break
+        
+        return has_friendly_neighbor
+
+    def _evaluate_center_control(self, board: Board, move: Action, player: int) -> float:
+        """评估中心控制价值
+        
+        中心位置通常具有更高的战略价值
+        """
         size = board.size
-        paths = 0
+        center_x = size // 2
+        center_y = size // 2
         
-        if player == 1:  # 横向连接
-            for x in range(size):
-                empty_count = 0
-                player_count = 0
-                for y in range(size):
-                    if board.board[x, y] == 0:
-                        empty_count += 1
-                    elif board.board[x, y] == player:
-                        player_count += 1
-                # 如果这条路径上没有对手的棋子
-                if player_count + empty_count == size:
-                    paths += (1.0 + 0.5 * player_count)  # 已有棋子越多，分数越高
-        else:  # 纵向连接
-            for y in range(size):
-                empty_count = 0
-                player_count = 0
-                for x in range(size):
-                    if board.board[x, y] == 0:
-                        empty_count += 1
-                    elif board.board[x, y] == player:
-                        player_count += 1
-                if player_count + empty_count == size:
-                    paths += (1.0 + 0.5 * player_count)
+        # 计算到中心的距离
+        dx = abs(move.x - center_x)
+        dy = abs(move.y - center_y)
+        manhattan_dist = dx + dy
         
-        return paths / size  # 归一化
-
-    def _evaluate_bridge_potential(self, board: Board, move: Action, current_player: int) -> float:
-        """评估形成桥接潜力"""
+        # 归一化距离分数，距离越近分数越高
+        max_dist = size - 1
+        distance_score = 1.0 - (manhattan_dist / max_dist)
+        
+        # 考虑周围己方棋子的影响
+        friendly_pieces = 0
         directions = [(0,1), (1,0), (-1,0), (0,-1), (1,-1), (-1,1)]
-        bridge_score = 0.0
+        for dx, dy in directions:
+            x, y = move.x + dx, move.y + dy
+            if (0 <= x < size and 0 <= y < size and 
+                board.board[x, y] == player):
+                friendly_pieces += 1
         
-        for i in range(len(directions)//2):
-            dir1, dir2 = directions[i], directions[i+len(directions)//2]
-            x1, y1 = move.x + dir1[0], move.y + dir1[1]
-            x2, y2 = move.x + dir2[0], move.y + dir2[1]
-            
-            if (0 <= x1 < board.size and 0 <= y1 < board.size and
-                0 <= x2 < board.size and 0 <= y2 < board.size):
-                if (board.board[x1, y1] == current_player and 
-                    board.board[x2, y2] == current_player):
-                    bridge_score += 1.0
-                elif ((board.board[x1, y1] == current_player and board.board[x2, y2] == 0) or
-                      (board.board[x1, y1] == 0 and board.board[x2, y2] == current_player)):
-                    bridge_score += 0.5
-                
-        return bridge_score / len(directions)
-
-    def _evaluate_blocking_value(self, board: Board, move: Action, current_player: int) -> float:
-        """评估一个动作的阻挡价值"""
-        opponent = 3 - current_player
-        blocking_score = 0.0
+        friendly_score = friendly_pieces / len(directions)
         
-        temp_board = board.copy()
-        temp_board.board[move.x, move.y] = current_player
-        
-        directions = [(0,1), (1,0), (-1,0), (0,-1), (1,-1), (-1,1)]
-        for dx1, dy1 in directions:
-            x1, y1 = move.x + dx1, move.y + dy1
-            if not (0 <= x1 < board.size and 0 <= y1 < board.size):
-                continue
-                
-            if board.board[x1, y1] == opponent:
-                connected_count = 0
-                for dx2, dy2 in directions:
-                    x2, y2 = x1 + dx2, y1 + dy2
-                    if (0 <= x2 < board.size and 
-                        0 <= y2 < board.size and 
-                        board.board[x2, y2] == opponent):
-                        connected_count += 1
-                
-                if connected_count > 0:
-                    blocking_score += connected_count / len(directions)
-        
-        return blocking_score / len(directions)
+        # 综合评分
+        return 0.7 * distance_score + 0.3 * friendly_score
 
 class MCTSAgent(Agent):
     """MCTS智能体"""
@@ -768,11 +866,11 @@ if __name__ == "__main__":
     board = Board(size=5)
     
     player1_moves = [
-        (0, 2), (1, 1), (1, 2), (1, 4), (2, 2), (2, 4), (3, 0), (3,4), (4, 0),
+        (1, 2), (1, 3), (1, 4),
     ]
     
     player2_moves = [
-        (0, 0), (0, 1), (2, 0), (2, 3), (3, 1), (3, 3), (4, 1), (4, 2), (4, 3)
+        (3, 0), (3, 2), (4, 1),
     ]
     
     # 放置棋子

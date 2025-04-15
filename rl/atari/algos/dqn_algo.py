@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 import random
 import os
+import time
 
 from .base_algo import Algo
 from models.dqn_model import DQN             # 假设 dqn_model.py 在项目根目录
@@ -101,7 +102,9 @@ class AlgoDQN(Algo):
         """存储经验，并在满足条件时执行学习步骤"""
         # 1. 存储经验
         # 注意转换类型以匹配 ReplayBuffer 的 push 签名
+        t0 = time.time()
         self.memory.push(state, np.array([action]), np.array([reward]), next_state, np.array([done]))
+        buffer_time = time.time() - t0
 
         # 2. 检查是否可以开始学习
         # 条件1: 交互步数是否达到 'learning_starts' (配置参数)
@@ -119,15 +122,17 @@ class AlgoDQN(Algo):
         # --- 如果满足学习条件，则执行以下步骤 ---
 
         # 3. 从缓冲区采样
-        # 从 memory (ReplayBuffer 实例) 中随机抽取一个批次的经验数据
+        t0 = time.time()
         batch = self.memory.sample(self.batch_size)
         if batch is None: # 以防万一采样失败
             print("[警告] 采样失败")
             return None
         # 解包批次数据
         states, actions, rewards, next_states, dones = batch
+        buffer_time += time.time() - t0
 
         # 4. 计算 Q(s_t, a_t) - 当前状态-动作对的 Q 值 (预测值)
+        t0 = time.time()
         self.policy_net.train() # 确保策略网络处于训练模式（启用 dropout, batchnorm 等）
         # 将采样到的 'states' 输入策略网络，得到这些状态下所有可能动作的 Q 值
         q_values = self.policy_net(states)
@@ -144,8 +149,10 @@ class AlgoDQN(Algo):
             # 计算目标 Q 值 (TD Target): R + γ * max_a' Q_target(s', a')
             # (1 - dones) 的作用是：如果一个状态是终止状态 (done=True)，那么其后续价值为 0
             target_q_values = rewards + (self.gamma * max_next_q_values * (1 - dones))
+        network_time = time.time() - t0
 
         # 6. 计算损失 (Loss)
+        t0 = time.time()
         # 计算预测 Q 值 (q_values_for_actions) 和目标 Q 值 (target_q_values) 之间的差距
         # smooth_l1_loss (Huber Loss) 对异常值不那么敏感，比 MSELoss 更鲁棒
         loss = F.smooth_l1_loss(q_values_for_actions, target_q_values)
@@ -157,6 +164,7 @@ class AlgoDQN(Algo):
             # 对策略网络的梯度进行裁剪，防止梯度爆炸
             torch.nn.utils.clip_grad_value_(self.policy_net.parameters(), self.grad_clip_value)
         self.optimizer.step() # 使用优化器 (例如 Adam) 根据梯度更新策略网络的参数
+        optimizer_time = time.time() - t0
 
         # 8. 定期更新目标网络
         # 检查当前总步数距离上次更新目标网络是否超过了指定频率 (target_update_frequency)
@@ -175,11 +183,16 @@ class AlgoDQN(Algo):
             
         # 10. 添加定期调试信息
         if self.steps_done % self.DEBUG_INTERVAL == 0:
+            print(f"\n[DQN性能分析 Step {self.steps_done}]")
+            print(f"  - 缓冲区操作时间: {buffer_time*1000:.1f}ms")
+            print(f"  - 网络计算时间: {network_time*1000:.1f}ms")
+            print(f"  - 优化器时间: {optimizer_time*1000:.1f}ms")
+            print(f"  - 总时间: {(buffer_time + network_time + optimizer_time)*1000:.1f}ms")
+            
+            # 其他调试信息
             avg_reward = np.mean(rewards.cpu().numpy())
             avg_max_q = np.mean(q_values.max(dim=1)[0].detach().cpu().numpy())
             avg_loss = np.mean(self.recent_losses) if self.recent_losses else 0
-
-            print(f"\n[学习信息 Step {self.steps_done}]")
             print(f"  - 平均奖励: {avg_reward:.4f}")
             print(f"  - 平均最大Q值: {avg_max_q:.4f}")
             print(f"  - 平均损失: {avg_loss:.6f}")
@@ -187,23 +200,6 @@ class AlgoDQN(Algo):
             print(f"  - 缓冲区大小: {len(self.memory)}")
             print(f"  - 批次大小: {states.shape[0]}")
             
-            # 每1000步进行一次更详细的调试
-            if self.steps_done % self.DEBUG_INTERVAL * 5 == 0:
-                print(f"  - Q值范围: {q_values.min().item():.4f} 到 {q_values.max().item():.4f}")
-                print(f"  - 目标Q值范围: {target_q_values.min().item():.4f} 到 {target_q_values.max().item():.4f}")
-                print(f"  - 梯度范数: {self._computeGradNorm():.6f}")
-                print(f"  - 学习率: {self.optimizer.param_groups[0]['lr']}")
-                
-                # 检查可能的问题
-                if avg_loss < 0.001 and self.steps_done > 5000:
-                    print("  警告: 损失值过小，可能表示学习停滞")
-                
-                if q_values.max().item() - q_values.min().item() < 0.1:
-                    print("  警告: Q值范围太小，可能表示网络没有充分区分动作价值")
-                    
-                # 可视化Q值分布 
-                self.visualizeQDistribution(5)
-
         return loss_value
 
     def visualizeQDistribution(self, num_samples=10):

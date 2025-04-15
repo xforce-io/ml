@@ -1,4 +1,5 @@
 from __future__ import annotations
+import traceback
 from hex.agents.agent import Experience
 import numpy as np
 import torch
@@ -6,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import LambdaLR
 from hex.config import ExitConfig, get_current_device
-from hex.hex import State
+from hex.hex import Board, State
 from hex.log import ERROR, INFO, DEBUG, WARNING
 import logging
 from typing import List, Tuple, Dict, Optional
@@ -107,7 +108,7 @@ class HexNet(nn.Module):
         tensor = torch.zeros(3, self.board_size, self.board_size, dtype=torch.float32)
         
         # 一次性将numpy数组转换为tensor，并重用
-        board = torch.from_numpy(state.board)
+        board = torch.from_numpy(state.board.board)
         
         # 使用torch.where进行向量化操作，避免创建中间布尔张量
         tensor[0] = torch.where(board == 1, 1.0, 0.0)
@@ -266,14 +267,17 @@ network_server: HexNetTrainerPredictor = None
 @app.post("/predict", response_model=PredictionResponse)
 async def predict(state: StateData):
     try:
-        state_obj = State(np.array(state.board), state.current_player)
+        board_array = np.array(state.board)
+        state_obj = State(
+            board=Board(board=board_array), 
+            current_player=state.current_player)
         action_probs, value = network_server.predict(state_obj)
         return {
             "action_probs": action_probs.tolist(),
             "value": float(value)
         }
     except Exception as e:
-        ERROR(logger, f"Prediction error: {e}")
+        ERROR(logger, f"Prediction error: {e} traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/train", response_model=TrainingResponse)
@@ -281,8 +285,9 @@ async def train(data: TrainingData):
     try:
         batch = []
         for state, probs, reward in zip(data.states, data.action_probs, data.rewards):
+            board_array = np.array(state.board)
             batch.append({
-                'state': State(np.array(state.board), state.current_player),
+                'state': State(Board(board=board_array), state.current_player),
                 'action_probs': np.array(probs),
                 'reward': reward
             })
@@ -293,7 +298,7 @@ async def train(data: TrainingData):
             "total_loss": float(policy_loss + value_loss)
         }
     except Exception as e:
-        ERROR(logger, f"Training error: {e}")
+        ERROR(logger, f"Training error: {e} traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/save")
@@ -386,12 +391,12 @@ class NetworkClient:
             data = {
                 "states": [
                     {
-                        "board": exp.state.board.tolist(),
+                        "board": exp.state.board.board.tolist(),
                         "current_player": exp.state.current_player
                     }
                     for exp in batch
                 ],
-                "action_probs": [exp.export_probs.tolist() for exp in batch],  # 注意这里是 action_probs 而不是 action_prob
+                "action_probs": [exp.export_probs.tolist() for exp in batch],
                 "rewards": [exp.reward for exp in batch]
             }
             response = self.session.post(f"{self.base_url}/train", json=data)
@@ -399,7 +404,7 @@ class NetworkClient:
             result = response.json()
             return result["policy_loss"], result["value_loss"]  # 返回两个损失值
         except Exception as e:
-            ERROR(logger, f"训练错误: {e}")
+            ERROR(logger, f"训练错误: {e} traceback: {traceback.format_exc()}")
             raise
 
     def save(self, path: str) -> Dict[str, str]:

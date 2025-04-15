@@ -3,6 +3,7 @@ import multiprocessing
 import random
 import sys
 import time
+import traceback
 from hex.log import ERROR, INFO, DEBUG
 from hex.agents.agent import Agent, Experience, create_random_agent
 from hex.config import DEBUG_STATE, ExitConfig, ExperimentConfig
@@ -124,7 +125,7 @@ class ExitAgent(Agent):
                       f"Value Loss: {result[1]:.4f}, "
                       f"costSec: {time.time() - start_time:.2f}s")
         except Exception as e:
-            ERROR(logger, f"Training error: {e}")
+            ERROR(logger, f"Training error: {e} traceback: {traceback.format_exc()}")
 
     def save_model(self, path: str):
         """保存模型"""

@@ -14,7 +14,7 @@ class Action:
 
 class State:
     """表示棋盘状态"""
-    def __init__(self, board: np.ndarray, current_player: int):
+    def __init__(self, board: Board, current_player: int):
         self.board = board.copy()
         self.current_player = current_player
     
@@ -64,7 +64,7 @@ class State:
         if current_player not in [1, 2]:
             raise ValueError("无效的玩家标记")
         
-        return cls(board.copy(), current_player)
+        return cls(Board(board_size, board), current_player)
 
     def __hash__(self):
         return hash((self.board.tobytes(), self.current_player))
@@ -75,10 +75,17 @@ class State:
 
 class Board:
     """Hex游戏棋盘"""
-    def __init__(self, size: int):
-        self.size = size
-        self.board = np.zeros((size, size), dtype=int)
-        
+    def __init__(
+            self, 
+            size: int = None, 
+            board: Optional[np.ndarray] = None):
+        if board is not None:
+            self.board = board
+            self.size = board.shape[0]
+        else:
+            self.board = np.zeros((size, size), dtype=int)
+            self.size = size
+
     def reset(self):
         """重置棋盘"""
         self.board.fill(0)
@@ -90,7 +97,7 @@ class Board:
 
     def get_state(self, player_id: int) -> State:
         """获取当前状态"""
-        return State(self.board, player_id)
+        return State(self, player_id)
     
     def is_valid_move(self, action: Action) -> bool:
         """检查动是否合法"""
@@ -161,6 +168,14 @@ class Board:
                     if dfs(0, y, visited):
                         return True
         return False
+    
+    def tobytes(self) -> bytes:
+        """将棋盘转换为字节串"""
+        return self.board.tobytes()
+    
+    def tolist(self) -> list:
+        """将棋盘转换为列表"""
+        return self.board.tolist()
     
     def copy(self) -> 'Board':
         """创建棋盘的深拷贝"""
