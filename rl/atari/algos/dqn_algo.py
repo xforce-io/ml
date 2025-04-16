@@ -9,6 +9,7 @@ import time
 from .base_algo import Algo
 from models.dqn_model import DQN             # 假设 dqn_model.py 在项目根目录
 from utils.replay_buffer import ReplayBuffer # 假设 replay_buffer.py 在项目根目录
+from utils.prioritized_replay_buffer import PrioritizedReplayBuffer # 新添加的优先经验回放缓冲区
 
 class AlgoDQN(Algo):
     """DQN 算法实现"""
@@ -38,6 +39,15 @@ class AlgoDQN(Algo):
         self.epsilon_decay_steps = dqn_config.EPSILON_DECAY_STEPS
         self.learning_starts = dqn_config.LEARNING_STARTS
         self.grad_clip_value = dqn_config.GRAD_CLIP_VALUE
+        
+        # 获取优先经验回放相关参数
+        self.use_prioritized_replay = dqn_config.USE_PRIORITIZED_REPLAY if hasattr(dqn_config, 'USE_PRIORITIZED_REPLAY') else False
+        if self.use_prioritized_replay:
+            self.per_alpha = dqn_config.PER_ALPHA
+            self.per_beta_start = dqn_config.PER_BETA_START
+            self.per_beta_increment = dqn_config.PER_BETA_INCREMENT
+            self.per_epsilon = dqn_config.PER_EPSILON
+            print(f"启用优先经验回放 (PER) - alpha: {self.per_alpha}, beta_start: {self.per_beta_start}")
 
         # 创建策略网络和目标网络
         self.policy_net = DQN(self.input_shape, self.num_actions).to(self.device)
@@ -49,7 +59,17 @@ class AlgoDQN(Algo):
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=dqn_config.LEARNING_RATE)
 
         # 创建经验回放缓冲区
-        self.memory = ReplayBuffer(dqn_config.REPLAY_BUFFER_CAPACITY, device=self.device)
+        if self.use_prioritized_replay:
+            self.memory = PrioritizedReplayBuffer(
+                dqn_config.REPLAY_BUFFER_CAPACITY, 
+                device=self.device,
+                alpha=self.per_alpha,
+                beta=self.per_beta_start,
+                beta_increment=self.per_beta_increment,
+                epsilon=self.per_epsilon
+            )
+        else:
+            self.memory = ReplayBuffer(dqn_config.REPLAY_BUFFER_CAPACITY, device=self.device)
 
         # 评估时的固定 epsilon
         self.eval_epsilon = 0.001  # 可以从配置中获取如果有的话
@@ -123,12 +143,20 @@ class AlgoDQN(Algo):
 
         # 3. 从缓冲区采样
         t0 = time.time()
-        batch = self.memory.sample(self.batch_size)
-        if batch is None: # 以防万一采样失败
-            print("[警告] 采样失败")
-            return None
-        # 解包批次数据
-        states, actions, rewards, next_states, dones = batch
+        if self.use_prioritized_replay:
+            # 对于优先经验回放，sample会返回额外的索引和权重
+            states, actions, rewards, next_states, dones, indices, weights = self.memory.sample(self.batch_size)
+        else:
+            # 普通经验回放
+            batch = self.memory.sample(self.batch_size)
+            if batch is None: # 以防万一采样失败
+                print("[警告] 采样失败")
+                return None
+            # 解包批次数据
+            states, actions, rewards, next_states, dones = batch
+            # 创建虚拟权重 (全1) 用于保持代码一致性
+            weights = torch.ones((self.batch_size, 1), device=self.device)
+            
         buffer_time += time.time() - t0
 
         # 4. 计算 Q(s_t, a_t) - 当前状态-动作对的 Q 值 (预测值)
@@ -151,11 +179,16 @@ class AlgoDQN(Algo):
             target_q_values = rewards + (self.gamma * max_next_q_values * (1 - dones))
         network_time = time.time() - t0
 
-        # 6. 计算损失 (Loss)
+        # 6. 计算TD误差和损失 (Loss)
         t0 = time.time()
-        # 计算预测 Q 值 (q_values_for_actions) 和目标 Q 值 (target_q_values) 之间的差距
-        # smooth_l1_loss (Huber Loss) 对异常值不那么敏感，比 MSELoss 更鲁棒
-        loss = F.smooth_l1_loss(q_values_for_actions, target_q_values)
+        # 计算TD误差 (用于更新优先级)
+        td_errors = target_q_values - q_values_for_actions
+        
+        # 计算带权重的损失
+        # 使用smooth_l1_loss (Huber Loss)，对异常值不那么敏感
+        # 注意我们将每个样本的损失乘以对应的重要性采样权重
+        elementwise_loss = F.smooth_l1_loss(q_values_for_actions, target_q_values, reduction='none')
+        loss = (elementwise_loss * weights).mean()
 
         # 7. 优化模型 (执行反向传播和参数更新)
         self.optimizer.zero_grad() # 清除上一轮的梯度
@@ -166,7 +199,12 @@ class AlgoDQN(Algo):
         self.optimizer.step() # 使用优化器 (例如 Adam) 根据梯度更新策略网络的参数
         optimizer_time = time.time() - t0
 
-        # 8. 定期更新目标网络
+        # 8. 如果使用优先经验回放，更新样本优先级
+        if self.use_prioritized_replay:
+            # 使用最新计算的TD误差更新优先级
+            self.memory.update_priorities(indices, td_errors.detach().abs())
+
+        # 9. 定期更新目标网络
         # 检查当前总步数距离上次更新目标网络是否超过了指定频率 (target_update_frequency)
         if self.steps_done - self.last_target_update >= self.target_update_frequency:
             print(f"\n[Step {self.steps_done}] 更新目标网络")
@@ -175,13 +213,13 @@ class AlgoDQN(Algo):
             # 更新上次更新的步数记录
             self.last_target_update = self.steps_done
             
-        # 9. 记录损失值用于统计
+        # 10. 记录损失值用于统计
         loss_value = loss.item()
         self.recent_losses.append(loss_value)
         if len(self.recent_losses) > 100:
             self.recent_losses.pop(0)
             
-        # 10. 添加定期调试信息
+        # 11. 添加定期调试信息
         if self.steps_done % self.DEBUG_INTERVAL == 0:
             print(f"\n[DQN性能分析 Step {self.steps_done}]")
             print(f"  - 缓冲区操作时间: {buffer_time*1000:.1f}ms")
@@ -200,6 +238,9 @@ class AlgoDQN(Algo):
             print(f"  - 缓冲区大小: {len(self.memory)}")
             print(f"  - 批次大小: {states.shape[0]}")
             
+            if self.use_prioritized_replay:
+                print(f"  - PER Beta值: {self.memory.beta:.4f}")
+                
         return loss_value
 
     def visualizeQDistribution(self, num_samples=10):
@@ -276,41 +317,51 @@ class AlgoDQN(Algo):
             print("未安装matplotlib，无法绘制分布图")
 
     def save(self, directory, filename):
-        """保存策略网络的权重"""
-        super().save(directory, filename) # 调用基类确保目录存在
+        """保存模型和训练状态"""
+        if not os.path.exists(directory):
+            os.makedirs(directory)
         filepath = os.path.join(directory, filename)
-        torch.save(self.policy_net.state_dict(), filepath)
-        print(f"DQN 模型已保存到 {filepath}")
-        return True
-
+        torch.save({
+            'policy_net_state_dict': self.policy_net.state_dict(),
+            'target_net_state_dict': self.target_net.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'steps_done': self.steps_done,
+            'use_prioritized_replay': self.use_prioritized_replay
+        }, filepath)
+        print(f"模型已保存到 {filepath}")
+        
     def load(self, filepath):
-        """加载策略网络的权重"""
+        """加载模型和训练状态"""
         if not os.path.exists(filepath):
-            print(f"错误：无法加载模型，文件不存在: {filepath}")
+            print(f"模型文件不存在: {filepath}")
             return False
-        try:
-            self.policy_net.load_state_dict(torch.load(filepath, map_location=self.device))
-            self.target_net.load_state_dict(self.policy_net.state_dict()) # 保持目标网络同步
-            self.policy_net.eval() # 通常加载后用于评估，设置为评估模式
-            self.target_net.eval()
-            print(f"DQN 模型已从 {filepath} 加载")
-            return True
-        except Exception as e:
-            print(f"加载模型时出错: {e}")
-            return False
-
+            
+        checkpoint = torch.load(filepath, map_location=self.device)
+        self.policy_net.load_state_dict(checkpoint['policy_net_state_dict'])
+        self.target_net.load_state_dict(checkpoint['target_net_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.steps_done = checkpoint['steps_done']
+        
+        # 确保优先经验回放设置与加载的模型匹配
+        saved_per = checkpoint.get('use_prioritized_replay', False)
+        if saved_per != self.use_prioritized_replay:
+            print(f"警告: 加载的模型使用了{'优先'if saved_per else '普通'}经验回放，但当前配置使用{'优先'if self.use_prioritized_replay else '普通'}经验回放")
+        
+        print(f"模型已加载: {filepath}, 训练步数: {self.steps_done}")
+        return True
+        
     def setEvalMode(self):
         """设置为评估模式"""
         self.policy_net.eval()
-
+        
     def setTrainMode(self):
         """设置为训练模式"""
         self.policy_net.train()
-
+        
     def getCurrentEpsilon(self):
         """获取当前的 epsilon 值"""
         return self._calculateEpsilon()
-    
+        
     def updateStepsDone(self, steps):
-        """更新内部步数计数器，可能触发目标网络更新"""
+        """更新已完成的步数"""
         self.steps_done = steps 
