@@ -1,3 +1,4 @@
+import logging
 from log import ERROR, INFO, WARNING
 import torch
 import torch.optim as optim
@@ -12,6 +13,8 @@ from models.dqn_model import DQN             # 假设 dqn_model.py 在项目根�
 from utils.replay_buffer import ReplayBuffer # 假设 replay_buffer.py 在项目根目录
 from utils.prioritized_replay_buffer import PrioritizedReplayBuffer # 新添加的优先经验回放缓冲区
 
+logger = logging.getLogger(__name__)
+
 class AlgoDQN(Algo):
     """DQN 算法实现"""
 
@@ -19,7 +22,7 @@ class AlgoDQN(Algo):
     
     def __init__(self, env, config, device):
         super().__init__(env, config, device)
-        INFO(f"初始化 DQN 算法 (AlgoDQN) 在设备: {self.device}")
+        INFO(logger, f"初始化 DQN 算法 (AlgoDQN) 在设备: {self.device}")
 
         # 处理配置，支持直接传入DQNConfig或整个Config对象
         if hasattr(config, 'BATCH_SIZE'):
@@ -48,7 +51,7 @@ class AlgoDQN(Algo):
             self.per_beta_start = dqn_config.PER_BETA_START
             self.per_beta_increment = dqn_config.PER_BETA_INCREMENT
             self.per_epsilon = dqn_config.PER_EPSILON
-            INFO(f"启用优先经验回放 (PER) - alpha: {self.per_alpha}, beta_start: {self.per_beta_start}")
+            INFO(logger, f"启用优先经验回放 (PER) - alpha: {self.per_alpha}, beta_start: {self.per_beta_start}")
 
         # 创建策略网络和目标网络
         self.policy_net = DQN(self.input_shape, self.num_actions).to(self.device)
@@ -132,12 +135,12 @@ class AlgoDQN(Algo):
         # 条件2: 经验回放缓冲区中的样本数量是否足够一个批次 (batch_size)
         if self.steps_done < self.learning_starts:
             if self.steps_done % self.DEBUG_INTERVAL == 0:
-                INFO(f"[等待学习] 步数: {self.steps_done}/{self.learning_starts}, 经验缓冲区: {len(self.memory)}/{self.batch_size}")
+                INFO(logger, f"[等待学习] 步数: {self.steps_done}/{self.learning_starts}, 经验缓冲区: {len(self.memory)}/{self.batch_size}")
             return None # 如果不满足条件，则暂时不学习，直接返回
             
         if len(self.memory) < self.batch_size:
             if self.steps_done % self.DEBUG_INTERVAL == 0:
-                INFO(f"[缓冲区填充中] 经验缓冲区: {len(self.memory)}/{self.batch_size}")
+                INFO(logger, f"[缓冲区填充中] 经验缓冲区: {len(self.memory)}/{self.batch_size}")
             return None # 样本不足，不学习
 
         # --- 如果满足学习条件，则执行以下步骤 ---
@@ -149,13 +152,13 @@ class AlgoDQN(Algo):
             states, actions, rewards, next_states, dones, indices, weights = self.memory.sample(self.batch_size)
             # 检查权重是否合理
             if torch.any(weights.isnan()) or torch.any(weights.isinf()):
-                WARNING("[警告] 权重中包含 nan 或 inf 值")
+                WARNING(logger, "[警告] 权重中包含 nan 或 inf 值")
                 weights = torch.clamp(weights, min=1e-5, max=1e5)  # 限制权重范围
         else:
             # 普通经验回放
             batch = self.memory.sample(self.batch_size)
             if batch is None: # 以防万一采样失败
-                WARNING("[警告] 采样失败")
+                WARNING(logger, "[警告] 采样失败")
                 return None
             # 解包批次数据
             states, actions, rewards, next_states, dones = batch
@@ -171,7 +174,7 @@ class AlgoDQN(Algo):
         q_values = self.policy_net(states)
         # 检查 q_values 是否包含 nan 或 inf
         if torch.any(q_values.isnan()) or torch.any(q_values.isinf()):
-            WARNING("[警告] q_values 中包含 nan 或 inf 值")
+            WARNING(logger, "[警告] q_values 中包含 nan 或 inf 值")
         # 从 q_values 中，根据采样到的 'actions'，精确地提取出实际执行动作对应的 Q 值
         q_values_for_actions = q_values.gather(1, actions)
 
@@ -188,20 +191,20 @@ class AlgoDQN(Algo):
             
             # 可选: 检查动作索引的形状是否正确
             if best_next_actions.shape[0] != next_states.shape[0]:
-                WARNING(f"Double DQN: 策略网络选择的动作数量 ({best_next_actions.shape[0]}) 与批次大小 ({next_states.shape[0]}) 不符")
+                WARNING(logger, f"Double DQN: 策略网络选择的动作数量 ({best_next_actions.shape[0]}) 与批次大小 ({next_states.shape[0]}) 不符")
 
             # 步骤 2: 使用目标网络 (target_net) 获取下一状态的所有 Q 值
             next_q_values_target = self.target_net(next_states)
             # 可选: 检查目标网络输出
             if torch.any(next_q_values_target.isnan()) or torch.any(next_q_values_target.isinf()):
-                WARNING("Double DQN: 目标网络输出的 next_q_values 中包含 nan 或 inf 值")
+                WARNING(logger, "Double DQN: 目标网络输出的 next_q_values 中包含 nan 或 inf 值")
                 
             # 步骤 3: 使用目标网络 (target_net) 评估由策略网络选出的最佳动作 (best_next_actions) 的 Q 值
             # 使用 gather 从目标网络的输出中，根据策略网络选出的动作索引，提取 Q 值
             selected_next_q_values = next_q_values_target.gather(1, best_next_actions)
             # 可选: 检查选定的 Q 值
             if torch.any(selected_next_q_values.isnan()) or torch.any(selected_next_q_values.isinf()):
-                WARNING("Double DQN: 选定的下一状态 Q 值包含 nan 或 inf 值")
+                WARNING(logger, "Double DQN: 选定的下一状态 Q 值包含 nan 或 inf 值")
             # --- Double DQN 核心逻辑结束 ---
 
             # 计算目标 Q 值 (TD Target): R + γ * Q_target(s', argmax_a Q_policy(s', a))
@@ -209,7 +212,7 @@ class AlgoDQN(Algo):
             target_q_values = rewards + (self.gamma * selected_next_q_values * (1 - dones))
             # 检查最终的目标 Q 值
             if torch.any(target_q_values.isnan()) or torch.any(target_q_values.isinf()):
-                WARNING("Double DQN: 计算得到的 target_q_values 中包含 nan 或 inf 值")
+                WARNING(logger, "Double DQN: 计算得到的 target_q_values 中包含 nan 或 inf 值")
         
         # 将策略网络恢复到训练模式（因为在 with no_grad() 之前设置了 train()，
         # 并且 loss.backward() 需要它处于训练模式）
@@ -223,7 +226,7 @@ class AlgoDQN(Algo):
         td_errors = target_q_values - q_values_for_actions 
         # 检查 td_errors 是否包含 nan 或 inf
         if torch.any(td_errors.isnan()) or torch.any(td_errors.isinf()):
-            WARNING("td_errors 中包含 nan 或 inf 值")
+            WARNING(logger, "td_errors 中包含 nan 或 inf 值")
         
         # 计算带权重的损失
         # 使用smooth_l1_loss (Huber Loss)，对异常值不那么敏感
@@ -232,7 +235,7 @@ class AlgoDQN(Algo):
         loss = (elementwise_loss * weights).mean()
         # 检查 loss 是否为 nan 或 inf
         if torch.isnan(loss) or torch.isinf(loss):
-            WARNING("loss 为 nan 或 inf")
+            WARNING(logger, "loss 为 nan 或 inf")
 
         # 7. 优化模型 (执行反向传播和参数更新)
         self.optimizer.zero_grad() # 清除上一轮的梯度
@@ -251,7 +254,7 @@ class AlgoDQN(Algo):
         # 9. 定期更新目标网络
         # 检查当前总步数距离上次更新目标网络是否超过了指定频率 (target_update_frequency)
         if self.steps_done - self.last_target_update >= self.target_update_frequency:
-            INFO(f"\n[Step {self.steps_done}] 更新目标网络")
+            INFO(logger, f"\n[Step {self.steps_done}] 更新目标网络")
             # 将策略网络的最新权重复制给目标网络
             self.target_net.load_state_dict(self.policy_net.state_dict())
             # 更新上次更新的步数记录
@@ -265,32 +268,32 @@ class AlgoDQN(Algo):
             
         # 11. 添加定期调试信息
         if self.steps_done % self.DEBUG_INTERVAL == 0:
-            INFO(f"\n[DQN性能分析 Step {self.steps_done}]")
-            INFO(f"  - 缓冲区操作时间: {buffer_time*1000:.1f}ms")
-            INFO(f"  - 网络计算时间: {network_time*1000:.1f}ms")
-            INFO(f"  - 优化器时间: {optimizer_time*1000:.1f}ms")
-            INFO(f"  - 总时间: {(buffer_time + network_time + optimizer_time)*1000:.1f}ms")
+            INFO(logger, f"\n[DQN性能分析 Step {self.steps_done}]")
+            INFO(logger, f"  - 缓冲区操作时间: {buffer_time*1000:.1f}ms")
+            INFO(logger, f"  - 网络计算时间: {network_time*1000:.1f}ms")
+            INFO(logger, f"  - 优化器时间: {optimizer_time*1000:.1f}ms")
+            INFO(logger, f"  - 总时间: {(buffer_time + network_time + optimizer_time)*1000:.1f}ms")
             
             # 其他调试信息
             avg_reward = np.mean(rewards.cpu().numpy())
             avg_max_q = np.mean(q_values.max(dim=1)[0].detach().cpu().numpy())
             avg_loss = np.mean(self.recent_losses) if self.recent_losses else 0
-            INFO(f"  - 平均奖励: {avg_reward:.4f}")
-            INFO(f"  - 平均最大Q值: {avg_max_q:.4f}")
-            INFO(f"  - 平均损失: {avg_loss:.6f}")
-            INFO(f"  - 当前Epsilon: {self._calculateEpsilon():.4f}")
-            INFO(f"  - 缓冲区大小: {len(self.memory)}")
-            INFO(f"  - 批次大小: {states.shape[0]}")
+            INFO(logger, f"  - 平均奖励: {avg_reward:.4f}")
+            INFO(logger, f"  - 平均最大Q值: {avg_max_q:.4f}")
+            INFO(logger, f"  - 平均损失: {avg_loss:.6f}")
+            INFO(logger, f"  - 当前Epsilon: {self._calculateEpsilon():.4f}")
+            INFO(logger, f"  - 缓冲区大小: {len(self.memory)}")
+            INFO(logger, f"  - 批次大小: {states.shape[0]}")
             
             if self.use_prioritized_replay:
-                INFO(f"  - PER Beta值: {self.memory.beta:.4f}")
+                INFO(logger, f"  - PER Beta值: {self.memory.beta:.4f}")
                 
         return loss_value
 
     def visualizeQDistribution(self, num_samples=10):
         """可视化Q值分布来检查学习进展"""
         if len(self.memory) < num_samples:
-            WARNING("经验回放缓冲区样本不足")
+            WARNING(logger, "经验回放缓冲区样本不足")
             return
         
         # 从缓冲区获取样本
@@ -312,12 +315,12 @@ class AlgoDQN(Algo):
                 try:
                     states_np.append(np.array(state_data))
                 except Exception as e:
-                    WARNING(f"无法将索引 {idx} 处的状态数据转换为 NumPy，跳过此样本。错误: {e}")
+                    WARNING(logger, f"无法将索引 {idx} 处的状态数据转换为 NumPy，跳过此样本。错误: {e}")
                     continue # 跳过这个无法处理的样本
 
         # 检查是否成功收集到任何样本
         if not states_np:
-            ERROR("未能从缓冲区收集有效的状态样本进行可视化。")
+            ERROR(logger, "未能从缓冲区收集有效的状态样本进行可视化。")
             return
             
         # 将 NumPy 状态列表转换为单个 NumPy 数组
@@ -325,7 +328,7 @@ class AlgoDQN(Algo):
             final_states_np = np.array(states_np)
         except ValueError as e:
             # 如果状态形状不一致，np.array 会失败
-            ERROR(f"收集的状态形状不一致，无法创建批处理 NumPy 数组。错误: {e}")
+            ERROR(logger, f"收集的状态形状不一致，无法创建批处理 NumPy 数组。错误: {e}")
             return
 
         # 转换为张量并移到设备
@@ -339,15 +342,15 @@ class AlgoDQN(Algo):
         
         # 打印Q值分布
         INFO("\nQ值分布统计:")
-        INFO(f"平均Q值: {np.mean(q_values)}")
-        INFO(f"最大Q值: {np.max(q_values)}")
-        INFO(f"最小Q值: {np.min(q_values)}")
-        INFO(f"Q值范围: {np.max(q_values) - np.min(q_values)}")
-        INFO(f"Q值标准差: {np.std(q_values)}")
+        INFO(logger, f"平均Q值: {np.mean(q_values)}")
+        INFO(logger, f"最大Q值: {np.max(q_values)}")
+        INFO(logger, f"最小Q值: {np.min(q_values)}")
+        INFO(logger, f"Q值范围: {np.max(q_values) - np.min(q_values)}")
+        INFO(logger, f"Q值标准差: {np.std(q_values)}")
         
         # 如果Q值都很接近，可能表示网络没有学习
         if np.std(q_values) < 0.1:
-            WARNING("警告: Q值标准差很小，可能表示网络没有有效学习")
+            WARNING(logger, "警告: Q值标准差很小，可能表示网络没有有效学习")
         
         # 如果matplotlib可用，绘制Q值分布
         try:
@@ -356,9 +359,9 @@ class AlgoDQN(Algo):
             plt.hist(q_values.flatten(), bins=50)
             plt.title('Q值分布')
             plt.savefig('q_values_distribution.png')
-            INFO("Q值分布图已保存到 q_values_distribution.png")
+            INFO(logger, "Q值分布图已保存到 q_values_distribution.png")
         except ImportError:
-            WARNING("未安装matplotlib，无法绘制分布图")
+            WARNING(logger, "未安装matplotlib，无法绘制分布图")
 
     def save(self, directory, filename):
         """保存模型和训练状态"""
@@ -372,12 +375,12 @@ class AlgoDQN(Algo):
             'steps_done': self.steps_done,
             'use_prioritized_replay': self.use_prioritized_replay
         }, filepath)
-        INFO(f"模型已保存到 {filepath}")
+        INFO(logger, f"模型已保存到 {filepath}")
         
     def load(self, filepath):
         """加载模型和训练状态"""
         if not os.path.exists(filepath):
-            INFO(f"模型文件不存在: {filepath}")
+            INFO(logger, f"模型文件不存在: {filepath}")
             return False
             
         checkpoint = torch.load(filepath, map_location=self.device)
@@ -389,9 +392,9 @@ class AlgoDQN(Algo):
         # 确保优先经验回放设置与加载的模型匹配
         saved_per = checkpoint.get('use_prioritized_replay', False)
         if saved_per != self.use_prioritized_replay:
-            INFO(f"警告: 加载的模型使用了{'优先'if saved_per else '普通'}经验回放，但当前配置使用{'优先'if self.use_prioritized_replay else '普通'}经验回放")
+            INFO(logger, f"警告: 加载的模型使用了{'优先'if saved_per else '普通'}经验回放，但当前配置使用{'优先'if self.use_prioritized_replay else '普通'}经验回放")
         
-        INFO(f"模型已加载: {filepath}, 训练步数: {self.steps_done}")
+        INFO(logger, f"模型已加载: {filepath}, 训练步数: {self.steps_done}")
         return True
         
     def setEvalMode(self):

@@ -1,3 +1,4 @@
+import logging
 from log import INFO
 import os
 import time
@@ -6,16 +7,13 @@ import numpy as np
 from collections import deque
 from typing import Dict, List, Any, Optional, Tuple
 import gymnasium as gym  # 确保导入gymnasium
-import cProfile
-import pstats
-from io import StringIO
 
 from wrappers.atari_wrappers import makeAtari
 from algos.base_algo import Algo
-from algos.random_algo import AlgoRandom
 from algos.dqn_algo import AlgoDQN
 from config import Config
 
+logger = logging.getLogger(__name__)
 
 class Experiment:
     """实验类，用于设置环境和算法、执行训练和评估"""
@@ -40,7 +38,7 @@ class Experiment:
         
         # 设置设备
         self.device = torch.device(self.config.general.DEVICE)
-        INFO(f"实验将在设备上运行: {self.device}")
+        INFO(logger, f"实验将在设备上运行: {self.device}")
         
         # 保存渲染设置
         self.render = render
@@ -60,13 +58,13 @@ class Experiment:
         # 创建模型保存目录
         if not os.path.exists(self.config.general.MODEL_SAVE_DIR):
             os.makedirs(self.config.general.MODEL_SAVE_DIR)
-            INFO(f"创建模型保存目录: {self.config.general.MODEL_SAVE_DIR}")
+            INFO(logger, f"创建模型保存目录: {self.config.general.MODEL_SAVE_DIR}")
             
         # 创建视频保存目录
         self.videos_dir = os.path.join(os.getcwd(), "videos")
         if not os.path.exists(self.videos_dir):
             os.makedirs(self.videos_dir)
-            INFO(f"创建视频保存目录: {self.videos_dir}")
+            INFO(logger, f"创建视频保存目录: {self.videos_dir}")
             
     def setAlgo(self, algo: Algo):
         """设置当前算法"""
@@ -92,9 +90,9 @@ class Experiment:
         # 训练时无需渲染，评估时可能需要渲染
         env = makeAtari(self.env_name, frame_stack=4, render_mode=render_mode)
             
-        INFO(f"创建环境: {self.env_name}")
-        INFO(f"观察空间形状: {env.observation_space.shape}")
-        INFO(f"动作空间大小: {env.action_space.n}")
+        INFO(logger, f"创建环境: {self.env_name}")
+        INFO(logger, f"观察空间形状: {env.observation_space.shape}")
+        INFO(logger, f"动作空间大小: {env.action_space.n}")
         return env
     
     def _runEpisode(self, deterministic: bool = False, 
@@ -150,11 +148,11 @@ class Experiment:
         # 每1000步输出一次性能统计
         if global_step % 1000 < episode_length:
             total_time = time.time() - episode_start
-            INFO(f"\n性能统计:")
-            INFO(f"环境执行时间占比: {total_env_time/total_time*100:.1f}%")
-            INFO(f"动作选择时间占比: {total_action_time/total_time*100:.1f}%")
-            INFO(f"学习时间占比: {total_learn_time/total_time*100:.1f}%")
-            INFO(f"每步平均耗时: {total_time/episode_length*1000:.1f}ms")
+            INFO(logger, f"\n性能统计:")
+            INFO(logger, f"环境执行时间占比: {total_env_time/total_time*100:.1f}%")
+            INFO(logger, f"动作选择时间占比: {total_action_time/total_time*100:.1f}%")
+            INFO(logger, f"学习时间占比: {total_learn_time/total_time*100:.1f}%")
+            INFO(logger, f"每步平均耗时: {total_time/episode_length*1000:.1f}ms")
         
         # 计算平均损失
         avg_loss = episode_loss / episode_length if episode_length > 0 else 0.0
@@ -178,17 +176,17 @@ class Experiment:
         avg_length = np.mean(recent_lengths) if recent_lengths else 0.0
         avg_loss = np.mean(recent_losses) if recent_losses else 0.0
         
-        INFO(f"\n步数: {step}/{total_steps} ({100.0 * step / total_steps:.1f}%)")
-        INFO(f"  最近 100 Episode 平均奖励: {avg_reward:.2f}")
-        INFO(f"  最近 100 Episode 平均长度: {avg_length:.1f}")
-        INFO(f"  最近 100 Episode 平均损失: {avg_loss:.4f}")
+        INFO(logger, f"\n步数: {step}/{total_steps} ({100.0 * step / total_steps:.1f}%)")
+        INFO(logger, f"  最近 100 Episode 平均奖励: {avg_reward:.2f}")
+        INFO(logger, f"  最近 100 Episode 平均长度: {avg_length:.1f}")
+        INFO(logger, f"  最近 100 Episode 平均损失: {avg_loss:.4f}")
         
         # 仅当使用 DQN 算法时显示特定信息
         if isinstance(self.algo, AlgoDQN):
-            INFO(f"  当前 Epsilon: {self.algo.getCurrentEpsilon():.4f}")
-            INFO(f"  缓冲区大小: {len(self.algo.memory)}")
+            INFO(logger, f"  当前 Epsilon: {self.algo.getCurrentEpsilon():.4f}")
+            INFO(logger, f"  缓冲区大小: {len(self.algo.memory)}")
         
-        INFO(f"  运行速度: {steps_per_sec:.1f} 步/秒")
+        INFO(logger, f"  运行速度: {steps_per_sec:.1f} 步/秒")
 
     def recordEpisodeVideo(self, step: int) -> None:
         """
@@ -208,7 +206,7 @@ class Experiment:
             episode_trigger=lambda x: True  # 录制每个episode
         )
         
-        INFO(f"\n[Step {step}] 开始录制游戏视频...")
+        INFO(logger, f"\n[Step {step}] 开始录制游戏视频...")
         
         # 使用当前算法在视频环境中运行一个episode
         state, _ = video_env.reset(seed=self.config.general.RANDOM_SEED + step)
@@ -232,8 +230,8 @@ class Experiment:
             state = next_state
         
         video_env.close()
-        INFO(f"[Step {step}] 视频录制完成。奖励: {episode_reward:.2f}, 长度: {episode_length}")
-        INFO(f"视频保存在: {self.videos_dir}")
+        INFO(logger, f"[Step {step}] 视频录制完成。奖励: {episode_reward:.2f}, 长度: {episode_length}")
+        INFO(logger, f"视频保存在: {self.videos_dir}")
         
     def train(self, num_steps: int = None) -> Dict[str, List]:
         """训练当前算法
@@ -255,11 +253,11 @@ class Experiment:
         render_mode = "human" if self.render else None
         self.env = self._createEnv(render_mode=render_mode)
         
-        INFO(f"\n开始训练 {self.algo.__class__.__name__} 算法, 总步数: {num_steps}")
+        INFO(logger, f"\n开始训练 {self.algo.__class__.__name__} 算法, 总步数: {num_steps}")
         
         # 如果启用了视频录制，显示提示信息
         if self.record_video:
-            INFO(f"视频录制功能已开启。每10000步将录制一个游戏视频，保存在: {self.videos_dir}")
+            INFO(logger, f"视频录制功能已开启。每10000步将录制一个游戏视频，保存在: {self.videos_dir}")
         
         # 训练指标
         train_metrics = {
@@ -310,7 +308,7 @@ class Experiment:
             
             # 打印本 episode 信息
             avg_recent_reward = np.mean(recent_rewards) if recent_rewards else 0.0
-            INFO(f"Episode {episode_count} - 奖励: {episode_reward:.2f}, 长度: {episode_length}, "
+            INFO(logger, f"Episode {episode_count} - 奖励: {episode_reward:.2f}, 长度: {episode_length}, "
                   f"平均奖励 (100): {avg_recent_reward:.2f}")
             
             # 定期打印训练统计信息 (基于步数)
@@ -349,7 +347,7 @@ class Experiment:
         )
         self.algo.save(self.config.general.MODEL_SAVE_DIR, f"{self.algo.__class__.__name__.lower()}_{self.env_name}_final.pth")
         
-        INFO("\n训练完成!")
+        INFO(logger, "\n训练完成!")
         
         return train_metrics
 
@@ -376,7 +374,7 @@ class Experiment:
         # 切换算法到评估模式
         self.algo.setEvalMode()
         
-        INFO(f"\n开始评估 {self.algo.__class__.__name__} 算法, {num_episodes} 个 episodes")
+        INFO(logger, f"\n开始评估 {self.algo.__class__.__name__} 算法, {num_episodes} 个 episodes")
         
         # 评估指标
         total_reward = 0.0
@@ -400,7 +398,7 @@ class Experiment:
                 victories += 1
                 
             # 打印结果
-            INFO(f"Episode {ep+1}/{num_episodes} - 奖励: {episode_reward:.2f}, 长度: {episode_length}")
+            INFO(logger, f"Episode {ep+1}/{num_episodes} - 奖励: {episode_reward:.2f}, 长度: {episode_length}")
         
         # 计算平均值
         avg_reward = total_reward / num_episodes
@@ -408,10 +406,10 @@ class Experiment:
         win_rate = victories / num_episodes
         
         # 打印总结
-        INFO(f"\n评估结果 ({num_episodes} episodes):")
-        INFO(f"  平均奖励: {avg_reward:.2f}")
-        INFO(f"  平均长度: {avg_length:.1f}")
-        INFO(f"  胜率: {win_rate:.2f} ({victories}/{num_episodes})")
+        INFO(logger, f"\n评估结果 ({num_episodes} episodes):")
+        INFO(logger, f"  平均奖励: {avg_reward:.2f}")
+        INFO(logger, f"  平均长度: {avg_length:.1f}")
+        INFO(logger, f"  胜率: {win_rate:.2f} ({victories}/{num_episodes})")
         
         # 返回指标
         return {

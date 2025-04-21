@@ -1,7 +1,9 @@
-from log import WARNING
+from log import WARNING, INFO
 import torch
 import numpy as np
-import random
+import logging
+
+logger = logging.getLogger(__name__)
 
 class SumTree:
     """
@@ -219,7 +221,7 @@ class PrioritizedReplayBuffer:
         # 在目标设备上分配状态缓冲区
         self.states = torch.zeros((self.capacity, *state_shape), dtype=torch.float32, device=self.device)
         self.next_states = torch.zeros((self.capacity, *state_shape), dtype=torch.float32, device=self.device)
-        INFO(f"PrioritizedReplayBuffer在设备{self.device}上初始化完成，状态形状: {state_shape}")
+        INFO(logger, f"PrioritizedReplayBuffer在设备{self.device}上初始化完成，状态形状: {state_shape}")
 
     def push(self, state, action, reward, next_state, done, td_error=None):
         """
@@ -292,7 +294,7 @@ class PrioritizedReplayBuffer:
         total_p = self.sum_tree.total_priority()
         # 检查总优先级是否有效
         if not torch.isfinite(total_p) or total_p <= 1e-6: # 增加一个小的阈值防止接近0
-            WARNING(f"SumTree总优先级异常: {total_p}. 无法进行优先采样，可能需要检查优先级更新逻辑。")
+            WARNING(logger, f"SumTree总优先级异常: {total_p}. 无法进行优先采样，可能需要检查优先级更新逻辑。")
             # 在这种情况下，可能需要采取备用策略，例如均匀采样或抛出错误
             # 这里我们暂时抛出错误，因为优先采样已失效
             raise ValueError(f"SumTree总优先级异常 ({total_p})，无法采样")
@@ -325,7 +327,7 @@ class PrioritizedReplayBuffer:
         # 归一化权重到[0, 1]范围，并检查最大权重
         max_weight = torch.max(is_weights)
         if not torch.isfinite(max_weight) or max_weight <= 1e-8:
-            WARNING(f"重要性采样权重最大值异常: {max_weight}. 将权重设置为1。")
+            WARNING(logger, f"重要性采样权重最大值异常: {max_weight}. 将权重设置为1。")
             # 如果最大权重无效，将所有权重设为1（相当于均匀采样）
             is_weights = torch.ones_like(is_weights)
         else:
@@ -358,7 +360,7 @@ class PrioritizedReplayBuffer:
             
             # 检查 TD 误差是否有限
             if not np.isfinite(error):
-                WARNING(f"TD误差包含非有限值: {error} at index {idx}. 使用epsilon作为优先级.")
+                WARNING(logger, f"TD误差包含非有限值: {error} at index {idx}. 使用epsilon作为优先级.")
                 # 如果TD误差无效，使用一个基于epsilon的默认优先级
                 priority = self.epsilon ** self.alpha
             else:
@@ -367,7 +369,7 @@ class PrioritizedReplayBuffer:
 
             # 确保优先级是有限的正数
             if not np.isfinite(priority):
-                WARNING(f"计算出的优先级为非有限值 at index {idx}. 使用epsilon作为优先级.")
+                WARNING(logger, f"计算出的优先级为非有限值 at index {idx}. 使用epsilon作为优先级.")
                 priority = self.epsilon ** self.alpha # 再次确保
             # 限制优先级的最小值，防止为0或负数
             priority = torch.clamp(torch.tensor(priority), min=1e-6).item() # Clamp后转回float存储
