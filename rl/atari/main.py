@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 
 import argparse
+from log import INFO
 import os
 import sys
-import time
 
 # 确保所有模块能被正确导入
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -40,7 +40,7 @@ def main():
     )
     
     # 打印运行环境信息
-    print(f"实验将在设备上运行: {experiment.device}")
+    INFO(f"实验将在设备上运行: {experiment.device}")
     
     # 首先创建环境
     render_mode = "human" if args.render else None
@@ -63,37 +63,37 @@ def main():
     # 如果提供了模型路径，尝试加载模型
     if args.model:
         model_path = args.model
-        print(f"加载模型: {model_path}")
+        INFO(f"加载模型: {model_path}")
     else:
         # 使用默认模型路径
         model_path = f"./saved_models/{args.algo}_{args.env}_final.pth"
         if args.mode in ['eval', 'train_and_eval']:
-            print(f"使用默认模型路径: {model_path}")
+            INFO(f"使用默认模型路径: {model_path}")
     
     # 根据模式运行实验
     if args.mode == 'train' or args.mode == 'train_and_eval':
-        print(f"训练 {args.algo} 算法在 {args.env} 环境")
+        INFO(f"训练 {args.algo} 算法在 {args.env} 环境")
         experiment.train(num_steps=args.steps)
         
         # 训练结束后，如果是'train_and_eval'模式，加载训练好的模型进行评估
         if args.mode == 'train_and_eval':
-            print(f"评估训练的模型: {model_path}")
+            INFO(f"评估训练的模型: {model_path}")
             experiment.algo.load(model_path)
             experiment.evaluate(num_episodes=args.episodes)
     
     elif args.mode == 'eval':
-        print(f"评估 {args.algo} 算法在 {args.env} 环境")
+        INFO(f"评估 {args.algo} 算法在 {args.env} 环境")
         # 加载模型
         success = experiment.algo.load(model_path)
         if success:
-            print(f"评估加载的模型: {model_path}")
+            INFO(f"评估加载的模型: {model_path}")
             experiment.evaluate(num_episodes=args.episodes)
         else:
-            print(f"无法加载模型: {model_path}，评估取消")
+            INFO(f"无法加载模型: {model_path}，评估取消")
     
     # 如果开启了调试模式，展示Q值分布
     if args.debug and args.algo == 'dqn':
-        print("\n===== 调试信息 =====")
+        INFO("\n===== 调试信息 =====")
         experiment.algo.visualizeQDistribution(num_samples=20)
 
 if __name__ == "__main__":

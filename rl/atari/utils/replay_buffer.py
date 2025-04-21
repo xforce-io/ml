@@ -42,7 +42,6 @@ class ReplayBuffer:
         # 在目标设备上分配状态缓冲区
         self.states = torch.zeros((self.capacity, *state_shape), dtype=torch.float32, device=self.device)
         self.next_states = torch.zeros((self.capacity, *state_shape), dtype=torch.float32, device=self.device)
-        print(f"ReplayBuffer 在设备 {self.device} 上初始化完成，状态形状: {state_shape}")
 
     def push(self, state, action, reward, next_state, done):
         """保存一个经验 transition，数据直接存到目标设备"""

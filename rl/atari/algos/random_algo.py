@@ -7,7 +7,6 @@ class AlgoRandom(Algo):
     """随机动作算法实现"""
     def __init__(self, env, config, device):
         super().__init__(env, config, device)
-        print(f"初始化随机算法 (AlgoRandom) 在设备: {self.device}")
         
         # 由于随机算法不需要学习，所以不需要额外的配置参数
         
@@ -24,12 +23,10 @@ class AlgoRandom(Algo):
     def save(self, directory, filename):
         """保存模型 (随机算法无需保存模型)"""
         super().save(directory, filename) # 确保目录存在
-        print(f"随机算法不需要保存模型，但记录了操作：{os.path.join(directory, filename)}")
         return True
     
     def load(self, filepath):
         """加载模型 (随机算法无需加载模型)"""
-        print(f"随机算法不需要加载模型，但记录了操作：{filepath}")
         return True
     
     def setEvalMode(self):
