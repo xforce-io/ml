@@ -53,18 +53,20 @@ class Experiment:
         self.algo = None
         
         # 训练数据
+
         self.episode_rewards = []
         
         # 创建模型保存目录
-        if not os.path.exists(self.config.general.MODEL_SAVE_DIR):
-            os.makedirs(self.config.general.MODEL_SAVE_DIR)
-            INFO(logger, f"创建模型保存目录: {self.config.general.MODEL_SAVE_DIR}")
+        self.model_save_dir = self.config.general.MODEL_SAVE_DIR
+        if not os.path.exists(self.model_save_dir):
+            os.makedirs(self.model_save_dir)
+            INFO(logger, f"创建模型保存目录: {self.model_save_dir}")
             
         # 创建视频保存目录
-        self.videos_dir = os.path.join(os.getcwd(), "videos")
-        if not os.path.exists(self.videos_dir):
-            os.makedirs(self.videos_dir)
-            INFO(logger, f"创建视频保存目录: {self.videos_dir}")
+        self.video_save_dir = self.config.general.VIDEO_SAVE_DIR
+        if not os.path.exists(self.video_save_dir):
+            os.makedirs(self.video_save_dir)
+            INFO(logger, f"创建视频保存目录: {self.video_save_dir}")
             
     def setAlgo(self, algo: Algo):
         """设置当前算法"""
@@ -88,7 +90,7 @@ class Experiment:
         """
         # 使用自定义的 Atari 包装函数
         # 训练时无需渲染，评估时可能需要渲染
-        env = makeAtari(self.env_name, frame_stack=4, render_mode=render_mode)
+        env = makeAtari(self.env_name, frameStack=4, renderMode=render_mode)
             
         INFO(logger, f"创建环境: {self.env_name}")
         INFO(logger, f"观察空间形状: {env.observation_space.shape}")
@@ -201,7 +203,7 @@ class Experiment:
         # 使用gymnasium的录像包装器
         video_env = gym.wrappers.RecordVideo(
             video_env, 
-            video_folder=self.videos_dir,
+            video_folder=self.video_save_dir,
             name_prefix=f"agent_{self.env_name.split('-')[0]}_{step}",
             episode_trigger=lambda x: True  # 录制每个episode
         )
@@ -231,7 +233,7 @@ class Experiment:
         
         video_env.close()
         INFO(logger, f"[Step {step}] 视频录制完成。奖励: {episode_reward:.2f}, 长度: {episode_length}")
-        INFO(logger, f"视频保存在: {self.videos_dir}")
+        INFO(logger, f"视频保存在: {self.video_save_dir}")
         
     def train(self, num_steps: int = None) -> Dict[str, List]:
         """训练当前算法
@@ -257,7 +259,7 @@ class Experiment:
         
         # 如果启用了视频录制，显示提示信息
         if self.record_video:
-            INFO(logger, f"视频录制功能已开启。每10000步将录制一个游戏视频，保存在: {self.videos_dir}")
+            INFO(logger, f"视频录制功能已开启。每10000步将录制一个游戏视频，保存在: {self.video_save_dir}")
         
         # 训练指标
         train_metrics = {

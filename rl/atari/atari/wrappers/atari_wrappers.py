@@ -221,45 +221,51 @@ class FrameStack(gym.Wrapper):
 
 class NormalizeObservation(gym.ObservationWrapper):
     def observation(self, obs):
+        # 确保输入是 numpy 数组
+        if not isinstance(obs, np.ndarray):
+            obs = np.array(obs) # 如果是 LazyFrames 等类型，先转换为数组
         return obs.astype(np.float32) / 255.0
 
 
 def makeAtari(
-        env_id, 
-        max_episode_steps=None, 
-        noop_max=30, 
-        frame_skip=4, 
-        screen_size=84, 
-        terminal_on_life_loss=True, 
-        clip_rewards=True, 
-        frame_stack=4, 
-        render_mode=None):
+        envId,
+        maxEpisodeSteps=None,
+        noopMax=30,
+        frameSkip=4,
+        screenSize=84,
+        terminalOnLifeLoss=True,
+        clipRewards=True,
+        frameStack=4,
+        renderMode=None):
     """创建并包装 Atari 环境的辅助函数"""
-    env = gym.make(env_id, obs_type='rgb', render_mode=render_mode) # 添加 render_mode 参数
+    env = gym.make(envId, obs_type='rgb', render_mode=renderMode) # 添加 renderMode 参数
 
-    # 设置最大步数限制
-    if max_episode_steps is not None:
-         env = gym.wrappers.TimeLimit(env, max_episode_steps=max_episode_steps)
-
+    # 应用核心 wrappers
     assert 'NoFrameskip' in env.spec.id # 确保使用 NoFrameskip 版本
-    env = NoopResetEnv(env, noop_max=noop_max)
-    # MaxAndSkip 不再直接支持 TimeLimit, TimeLimit 应在最外层或不使用 MaxAndSkip
-    env = MaxAndSkipEnv(env, skip=frame_skip) # 注意：MaxAndSkipEnv 应该在 TimeLimit 之前
+    env = NoopResetEnv(env, noop_max=noopMax)
+    env = MaxAndSkipEnv(env, skip=frameSkip) # MaxAndSkipEnv 应在 TimeLimit 之前
 
-    if terminal_on_life_loss:
+    if terminalOnLifeLoss:
         env = EpisodicLifeEnv(env)
 
-    if 'FIRE' in env.unwrapped.get_action_meanings():
+    # 检查 'FIRE' 动作是否存在且有效
+    actionMeanings = env.unwrapped.get_action_meanings()
+    if 'FIRE' in actionMeanings and actionMeanings.index('FIRE') == 1:
+         # 确保 FIRE 是第二个动作，以匹配 FireResetEnv 的逻辑
         env = FireResetEnv(env)
 
-    env = WarpFrame(env, width=screen_size, height=screen_size) # 默认灰度
+    env = WarpFrame(env, width=screenSize, height=screenSize) # 默认灰度
 
-    if clip_rewards:
+    if clipRewards:
         env = ClipRewardEnv(env)
 
-    if frame_stack > 1:
-        env = FrameStack(env, frame_stack) # FrameStack 需要 CHW 格式输入，并在内部处理
+    if frameStack > 1:
+        env = FrameStack(env, frameStack) # FrameStack 需要 CHW 格式输入，并在内部处理
 
     env = NormalizeObservation(env)
+
+    # 在所有其他 wrappers 之后应用 TimeLimit
+    if maxEpisodeSteps is not None:
+         env = gym.wrappers.TimeLimit(env, max_episode_steps=maxEpisodeSteps)
 
     return env 
