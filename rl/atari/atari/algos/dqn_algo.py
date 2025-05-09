@@ -1,5 +1,5 @@
 import logging
-from log import ERROR, INFO, WARNING
+from atari.log import ERROR, INFO, WARNING
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
@@ -9,9 +9,9 @@ import os
 import time
 
 from .base_algo import Algo
-from models.dqn_model import DQN             # 假设 dqn_model.py 在项目根目录
-from utils.replay_buffer import ReplayBuffer # 假设 replay_buffer.py 在项目根目录
-from utils.prioritized_replay_buffer import PrioritizedReplayBuffer # 新添加的优先经验回放缓冲区
+from atari.models.dqn_model import DQN             # 使用绝对导入
+from atari.utils.replay_buffer import ReplayBuffer # 使用绝对导入
+from atari.utils.prioritized_replay_buffer import PrioritizedReplayBuffer # 使用绝对导入
 
 logger = logging.getLogger(__name__)
 
@@ -53,9 +53,17 @@ class AlgoDQN(Algo):
             self.per_epsilon = dqn_config.PER_EPSILON
             INFO(logger, f"启用优先经验回放 (PER) - alpha: {self.per_alpha}, beta_start: {self.per_beta_start}")
 
+        # 检测游戏类型
+        if hasattr(config.general, 'ENV_NAME') and 'SuperMarioBros' in config.general.ENV_NAME:
+            game_type = "mario"
+            INFO(logger, f"检测到 Mario 游戏环境，使用适合的卷积架构")
+        else:
+            game_type = "atari"
+            INFO(logger, f"使用标准 Atari 游戏卷积架构")
+
         # 创建策略网络和目标网络
-        self.policy_net = DQN(self.input_shape, self.num_actions).to(self.device)
-        self.target_net = DQN(self.input_shape, self.num_actions).to(self.device)
+        self.policy_net = DQN(self.input_shape, self.num_actions, game_type=game_type).to(self.device)
+        self.target_net = DQN(self.input_shape, self.num_actions, game_type=game_type).to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()
 

@@ -17,18 +17,18 @@ class NoopResetEnv(gym.Wrapper):
 
     def reset(self, **kwargs):
         """ Do no-op action for a number of steps in [1, noop_max]."""
-        self.env.reset(**kwargs)
+        obs, info = self.env.reset(**kwargs)
         if self.override_num_noops is not None:
             noops = self.override_num_noops
         else:
             noops = self.unwrapped.np_random.integers(1, self.noop_max + 1)
         assert noops > 0
-        obs = None
         for _ in range(noops):
-            obs, _, terminated, truncated, _ = self.env.step(self.noop_action)
+            # 新版gymnasium API返回5个值
+            obs, _, terminated, truncated, info = self.env.step(self.noop_action)
             if terminated or truncated:
-                obs, _ = self.env.reset(**kwargs)
-        return obs, {} # 返回 observation 和空的 info 字典
+                obs, info = self.env.reset(**kwargs)
+        return obs, info
 
     def step(self, ac):
         return self.env.step(ac)
@@ -42,14 +42,18 @@ class FireResetEnv(gym.Wrapper):
         assert len(env.unwrapped.get_action_meanings()) >= 3
 
     def reset(self, **kwargs):
-        self.env.reset(**kwargs)
-        obs, _, terminated, truncated, _ = self.env.step(1) # FIRE
+        obs, info = self.env.reset(**kwargs)
+            
+        # 新版gymnasium API
+        obs, _, terminated, truncated, info = self.env.step(1) # FIRE
         if terminated or truncated:
-            self.env.reset(**kwargs)
-        obs, _, terminated, truncated, _ = self.env.step(2) # 第二个动作，通常是有效的开始动作
+            obs, info = self.env.reset(**kwargs)
+                
+        obs, _, terminated, truncated, info = self.env.step(2) # 第二个动作，通常是有效的开始动作
         if terminated or truncated:
-            self.env.reset(**kwargs)
-        return obs, {}
+            obs, info = self.env.reset(**kwargs)
+                
+        return obs, info
 
     def step(self, ac):
         return self.env.step(ac)
@@ -79,7 +83,7 @@ class EpisodicLifeEnv(gym.Wrapper):
             obs, info = self.env.reset(**kwargs)
         else:
             # 不调用 env.reset()，只发送 NOOP
-            obs, _, _, _, info = self.env.step(0)
+            obs, _, terminated, truncated, info = self.env.step(0)
         self.lives = self.env.unwrapped.ale.lives()
         return obs, info
 
@@ -155,6 +159,10 @@ class WarpFrame(gym.ObservationWrapper):
         else:
             frame = obs[self._key]
 
+        # 确保frame是numpy数组
+        if not isinstance(frame, np.ndarray):
+            frame = np.array(frame)
+
         if self._grayscale:
             frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
         frame = cv2.resize(
@@ -168,6 +176,7 @@ class WarpFrame(gym.ObservationWrapper):
         else:
             obs = obs.copy()
             obs[self._key] = frame
+            
         return obs
 
 
@@ -185,6 +194,7 @@ class FrameStack(gym.Wrapper):
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
+            
         # 转换为 CHW (通道, 高, 宽) 格式
         obs_chw = np.transpose(obs, (2, 0, 1))
         for _ in range(self.k):
@@ -223,7 +233,7 @@ class NormalizeObservation(gym.ObservationWrapper):
     def observation(self, obs):
         # 确保输入是 numpy 数组
         if not isinstance(obs, np.ndarray):
-            obs = np.array(obs) # 如果是 LazyFrames 等类型，先转换为数组
+            obs = np.array(obs)
         return obs.astype(np.float32) / 255.0
 
 
@@ -237,11 +247,53 @@ def makeAtari(
         clipRewards=True,
         frameStack=4,
         renderMode=None):
-    """创建并包装 Atari 环境的辅助函数"""
-    env = gym.make(envId, obs_type='rgb', render_mode=renderMode) # 添加 renderMode 参数
-
+    """创建并包装 Atari 环境的辅助函数
+    
+    Args:
+        envId (str): Atari环境ID
+        maxEpisodeSteps (int, optional): 每个episode的最大步数
+        noopMax (int): 执行的最大no-op操作数量
+        frameSkip (int): 跳过的帧数
+        screenSize (int): 图像的大小
+        terminalOnLifeLoss (bool): 是否将生命损失视为episode结束
+        clipRewards (bool): 是否将奖励裁剪至[-1,1]
+        frameStack (int): 堆叠的帧数
+        renderMode (str, optional): 渲染模式
+    
+    Returns:
+        gym.Env: 包装后的Atari环境
+    """
+    # 转换环境名称 - 使用新版gymnasium中的ALE命名空间
+    if 'NoFrameskip' in envId:
+        # 如果包含NoFrameskip，则转换为ALE版本
+        game = envId.split('NoFrameskip')[0]
+        processedEnvId = f"ALE/{game}NoFrameskip-v5"
+    elif 'ALE/' in envId:
+        # 如果已经是ALE格式，保持原样
+        processedEnvId = envId
+    else:
+        # 如果是简单游戏名称，使用ALE命名空间
+        processedEnvId = f"ALE/{envId}-v5"
+    
+    try:
+        # 尝试创建环境
+        env = gym.make(processedEnvId, render_mode=renderMode)
+        print(f"成功创建环境: {processedEnvId}")
+    except Exception as e:
+        print(f"创建环境 {processedEnvId} 失败: {e}")
+        # 尝试不同的环境名称格式
+        try:
+            # 尝试老版本格式
+            fallback_id = f"{envId.replace('NoFrameskip-v4', '-v4')}"
+            print(f"尝试使用备选环境 ID: {fallback_id}")
+            env = gym.make(fallback_id, render_mode=renderMode)
+        except Exception as e2:
+            print(f"创建备选环境 {fallback_id} 也失败: {e2}")
+            # 最后尝试原始 ID
+            print(f"使用原始环境 ID: {envId}")
+            env = gym.make(envId, render_mode=renderMode)
+    
     # 应用核心 wrappers
-    assert 'NoFrameskip' in env.spec.id # 确保使用 NoFrameskip 版本
     env = NoopResetEnv(env, noop_max=noopMax)
     env = MaxAndSkipEnv(env, skip=frameSkip) # MaxAndSkipEnv 应在 TimeLimit 之前
 
@@ -268,4 +320,4 @@ def makeAtari(
     if maxEpisodeSteps is not None:
          env = gym.wrappers.TimeLimit(env, max_episode_steps=maxEpisodeSteps)
 
-    return env 
+    return env

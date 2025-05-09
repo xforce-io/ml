@@ -5,25 +5,50 @@ import numpy as np
 
 class DQN(nn.Module):
     """简单的卷积 Q 网络"""
-    def __init__(self, input_shape, num_actions):
+    def __init__(self, input_shape, num_actions, game_type="atari"):
         """
         Args:
             input_shape (tuple): 输入观察值的形状
             num_actions (int): 可选动作的数量
+            game_type (str): 游戏类型，可以是"atari"或"mario"
         """
         super(DQN, self).__init__()
         self.input_shape = input_shape
         self.num_actions = num_actions
+        self.game_type = game_type
 
-        # (C, H, W) 格式
-        self.input_channels = input_shape[0]
-        self.input_height = input_shape[1]
-        self.input_width = input_shape[2]
+        # 根据游戏类型设置输入形状
+        if game_type == "mario":
+            # Mario游戏使用4帧堆叠，确保通道数是4
+            self.input_channels = 4
+            self.input_height = 84
+            self.input_width = 84
+        else:
+            # Atari游戏使用正常检测
+            if len(input_shape) == 3:
+                if input_shape[0] <= 4:  # 如果第一维是通道数（一般不会超过4）
+                    self.input_channels = input_shape[0]
+                    self.input_height = input_shape[1]
+                    self.input_width = input_shape[2]
+                else:  # 如果形状是(H, W, C)格式
+                    self.input_channels = input_shape[2]
+                    self.input_height = input_shape[0]
+                    self.input_width = input_shape[1]
+            else:
+                raise ValueError(f"输入形状不正确: {input_shape}，需要是三维形状")
 
-        # 卷积层: 参考 Nature DQN 论文结构
-        self.conv1 = nn.Conv2d(self.input_channels, 32, kernel_size=8, stride=4)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2)
-        self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
+        # 根据游戏类型选择不同的卷积架构
+        if game_type == "mario":
+            # Mario使用较小的卷积核和步长
+            # 对于84x84的输入，我们需要适当调整卷积参数
+            self.conv1 = nn.Conv2d(self.input_channels, 32, kernel_size=5, stride=2, padding=2)
+            self.conv2 = nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1)
+            self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1)
+        else:
+            # Atari使用原始的Nature DQN架构
+            self.conv1 = nn.Conv2d(self.input_channels, 32, kernel_size=8, stride=4)
+            self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2)
+            self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
 
         # 计算卷积层输出的大小，以便连接全连接层
         # 创建一个假的输入张量来计算尺寸

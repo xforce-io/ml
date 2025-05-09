@@ -8,40 +8,32 @@ import os
 # os.path.abspath resolves the absolute path
 # os.path.join combines the directory path and the filename
 CONFIG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'config'))
-CONFIG_PATH = os.path.join(CONFIG_DIR, 'global.yaml')
 
-config = {}
-
-try:
-    with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-        if config is None: # Handle empty file case
-             config = {}
-except FileNotFoundError:
-    # Handle the case where the config file doesn't exist
-    print(f"Error: Configuration file not found at {CONFIG_PATH}")
-    # You might want to raise an exception or provide default values here
-    # raise FileNotFoundError(f"Configuration file not found at {CONFIG_PATH}")
-except yaml.YAMLError as e:
-    # Handle errors during YAML parsing
-    print(f"Error parsing YAML file {CONFIG_PATH}: {e}")
-    # Depending on your application's needs, you might want to raise the exception
-    # raise yaml.YAMLError(f"Error parsing YAML file {CONFIG_PATH}: {e}")
-except Exception as e:
-    # Catch any other potential exceptions during file reading or processing
-    print(f"An unexpected error occurred while loading config: {e}")
-    # raise
-
-# You can access configuration values like this:
-# db_host = config.get('database', {}).get('host', 'default_host')
-# server_port = config.get('server', {}).get('port', 8000)
-
-# print(f"Database Host: {db_host}")
-# print(f"Server Port: {server_port}")
-
-# Or just export the loaded config dictionary
-def get_config():
-    """Returns the loaded configuration dictionary."""
+def load_config_from_file(config_name='global'):
+    """从指定的配置文件加载配置"""
+    config_path = os.path.join(CONFIG_DIR, f'{config_name}.yaml')
+    config = {}
+    
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f)
+            if config is None:  # Handle empty file case
+                config = {}
+    except FileNotFoundError:
+        # Handle the case where the config file doesn't exist
+        print(f"Error: Configuration file not found at {config_path}")
+        # You might want to raise an exception or provide default values here
+        # raise FileNotFoundError(f"Configuration file not found at {config_path}")
+    except yaml.YAMLError as e:
+        # Handle errors during YAML parsing
+        print(f"Error parsing YAML file {config_path}: {e}")
+        # Depending on your application's needs, you might want to raise the exception
+        # raise yaml.YAMLError(f"Error parsing YAML file {config_path}: {e}")
+    except Exception as e:
+        # Catch any other potential exceptions during file reading or processing
+        print(f"An unexpected error occurred while loading config: {e}")
+        # raise
+    
     return config
 
 # --- 通用配置 ---
@@ -51,6 +43,7 @@ class GeneralConfig:
         "TOTAL_TRAINING_STEPS": 1000000,
         "LOG_INTERVAL": 1000,
         "SAVE_INTERVAL": 50000,
+        "VIDEO_SAVE_INTERVAL": 20000,
         "MODEL_SAVE_DIR": "./saved_models",
         "VIDEO_SAVE_DIR": "./videos",
         "RANDOM_SEED": 42,
@@ -110,21 +103,22 @@ class RandomConfig:
         self.random_cfg = loaded_config.get('random', {})
 
 # --- 将所有配置组合到一个地方 ---
-loaded_config = get_config()
-
 class Config:
-    general = GeneralConfig(loaded_config)
-    dqn = DqnConfig(loaded_config)
-    random = RandomConfig(loaded_config)
+    def __init__(self, config_name='global'):
+        loaded_config = load_config_from_file(config_name)
+        self.general = GeneralConfig(loaded_config)
+        self.dqn = DqnConfig(loaded_config)
+        self.random = RandomConfig(loaded_config)
 
 if __name__ == '__main__':
+    config = Config()
     print("从 YAML 加载的配置（包含默认值）：")
     print("\n--- 通用配置 ---")
-    for key, value in vars(Config.general).items():
+    for key, value in vars(config.general).items():
         if key != 'DEFAULT_VALUES':
             print(f"{key}: {value}")
     print("\n--- DQN 配置 ---")
-    for key, value in vars(Config.dqn).items():
+    for key, value in vars(config.dqn).items():
         if key != 'DEFAULT_VALUES':
             print(f"{key}: {value}")
     print("\n--- 随机配置 ---")

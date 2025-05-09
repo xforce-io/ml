@@ -1,5 +1,5 @@
 import logging
-from log import INFO
+from atari.log import INFO
 import os
 import time
 import torch
@@ -8,10 +8,10 @@ from collections import deque
 from typing import Dict, List, Any, Optional, Tuple
 import gymnasium as gym  # 确保导入gymnasium
 
-from wrappers.atari_wrappers import makeAtari
-from algos.base_algo import Algo
-from algos.dqn_algo import AlgoDQN
-from config import Config
+from atari.wrappers.atari_wrappers import makeAtari
+from atari.algos.base_algo import Algo
+from atari.algos.dqn_algo import AlgoDQN
+from atari.config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -88,9 +88,36 @@ class Experiment:
         Returns:
             env: 包装好的 Gymnasium 环境
         """
-        # 使用自定义的 Atari 包装函数
-        # 训练时无需渲染，评估时可能需要渲染
-        env = makeAtari(self.env_name, frameStack=4, renderMode=render_mode)
+        # 判断是否是Mario环境
+        if 'SuperMarioBros' in self.env_name:
+            # 提取世界和关卡信息，例如从"SuperMarioBros-1-1-v0"提取"1-1"
+            world_stage = None
+            if '-' in self.env_name and 'v' in self.env_name:
+                parts = self.env_name.split('-')
+                if len(parts) >= 3:  # 例如：SuperMarioBros-1-1-v0
+                    world_stage = f"{parts[1]}-{parts[2].split('v')[0]}"
+            
+            # 使用makeMario函数创建环境
+            from atari.wrappers.mario_wrappers import makeMario
+            env = makeMario(
+                worldStage=world_stage,
+                maxEpisodeSteps=10000,
+                frameSkip=4,
+                grayscale=True,
+                resizeShape=(84, 84),
+                frameStack=4,
+                normalizeObs=True,
+                renderMode=render_mode
+            )
+            # MarioEnv 已经内置了时间限制逻辑，不需要额外的 TimeLimit 包装器
+        else:
+            # 使用makeAtari函数创建Atari环境
+            from atari.wrappers.atari_wrappers import makeAtari
+            env = makeAtari(
+                self.env_name, 
+                frameStack=4, 
+                renderMode=render_mode
+            )
             
         INFO(logger, f"创建环境: {self.env_name}")
         INFO(logger, f"观察空间形状: {env.observation_space.shape}")
@@ -105,7 +132,18 @@ class Experiment:
         episode_loss = 0.0
         
         # 重置环境
-        state, _ = self.env.reset(seed=self.config.general.RANDOM_SEED + global_step)
+        seed = self.config.general.RANDOM_SEED + global_step
+        try:
+            # 尝试使用带有seed参数的reset方法
+            state, _ = self.env.reset(seed=seed)
+        except (TypeError, ValueError):
+            # 如果环境不支持seed参数，则直接重置
+            reset_result = self.env.reset()
+            # 处理不同环境可能返回的不同格式
+            if isinstance(reset_result, tuple) and len(reset_result) == 2:
+                state, _ = reset_result
+            else:
+                state = reset_result
         
         # 性能统计
         total_env_time = 0
@@ -123,13 +161,15 @@ class Experiment:
             
             # 执行动作
             t0 = time.time()
-            next_state, reward, terminated, truncated, _ = self.env.step(action)
+            # 直接期望 Gymnasium API 的5个返回值
+            next_state, reward, terminated, truncated, info = self.env.step(action)
+            done = terminated or truncated
+            
             total_env_time += time.time() - t0
             
             # 累加当前 episode 指标
             episode_reward += reward
             episode_length += 1
-            done = terminated or truncated
             
             # 如果是训练模式，则执行学习步骤并更新步数
             if training:
@@ -259,7 +299,7 @@ class Experiment:
         
         # 如果启用了视频录制，显示提示信息
         if self.record_video:
-            INFO(logger, f"视频录制功能已开启。每10000步将录制一个游戏视频，保存在: {self.video_save_dir}")
+            INFO(logger, f"视频录制功能已开启。每{self.config.general.VIDEO_SAVE_INTERVAL}步将录制一个游戏视频，保存在: {self.video_save_dir}")
         
         # 训练指标
         train_metrics = {
@@ -327,10 +367,9 @@ class Experiment:
                 )
                 log_time = now
                 
-            # 每50000步录制一次视频
-            if self.record_video and global_step % 50000 < episode_length and global_step >= 10000:
-                # 如果当前episode跨越了50000步的倍数点，录制一个视频
-                self.recordEpisodeVideo(global_step)
+            if self.record_video and global_step >= 10000:
+                if global_step % self.config.general.VIDEO_SAVE_INTERVAL < episode_length:
+                    self.recordEpisodeVideo(global_step)
         
         # 最终输出
         self._logTrainingStats(
@@ -355,67 +394,78 @@ class Experiment:
 
     def evaluate(self, num_episodes: int = None) -> Dict[str, float]:
         """评估当前算法
-
+        
         Args:
-            num_episodes (int, optional): 要评估的 episodes 数量
-
+            num_episodes (int, optional): 要评估的Episode数量，如不提供则使用配置中的值
+            
         Returns:
-            Dict[str, float]: 包含评估指标的字典
+            Dict[str, float]: 包含评估指标的字典 (例如平均奖励、标准差等)
         """
         if self.algo is None:
             raise ValueError("请先设置算法后再开始评估")
-            
-        # 使用提供的 episodes 数量或默认值
-        if num_episodes is None:
-            num_episodes = self.config.general.EVAL_EPISODES
         
-        # 创建评估环境 (可能启用渲染)
+        num_episodes = num_episodes or self.config.general.EVAL_EPISODES
+        self.algo.setEvalMode()  # 设置为评估模式 (例如关闭探索)
+        
+        # 如果需要渲染，创建一个用于可视化的单独环境
         render_mode = "human" if self.render else None
-        self.env = self._createEnv(render_mode=render_mode)
         
-        # 切换算法到评估模式
-        self.algo.setEvalMode()
+        # 保留当前的训练环境引用
+        train_env = self.env
         
-        INFO(logger, f"\n开始评估 {self.algo.__class__.__name__} 算法, {num_episodes} 个 episodes")
+        # 若为Atari游戏使用_createEnv方法创建环境，若为Mario游戏则沿用main.py中创建的环境
+        if "SuperMarioBros" in self.env_name:
+            # 对于Mario游戏，环境已经在main.py中创建，这里仅在需要重置时才重新创建
+            if render_mode == "human" and (not hasattr(self.env.env, 'render') or not hasattr(self.env.env, 'reset')):
+                from atari.wrappers import makeMario
+                world_stage = None
+                if "-" in self.env_name:
+                    parts = self.env_name.split("-")
+                    if len(parts) >= 3 and parts[1].isdigit() and parts[2].isdigit():
+                        world_stage = f"{parts[1]}-{parts[2]}"
+                self.env = makeMario(worldStage=world_stage, renderMode=render_mode)
+        else:
+            # 对于Atari游戏，使用原有的环境创建方法
+            self.env = self._createEnv(render_mode=render_mode)
         
-        # 评估指标
-        total_reward = 0.0
-        total_length = 0
-        victories = 0  # 可选：在某些游戏中获胜的次数
+        INFO(logger, f"\n开始评估 {self.env_name} 环境中的 {self.algo.__class__.__name__}")
+        INFO(logger, f"评估 episodes: {num_episodes}, 确定性策略: {self.render}")
         
-        # 评估循环
-        for ep in range(num_episodes):
-            # 运行一个 episode
-            episode_reward, episode_length, _, _ = self._runEpisode(
-                deterministic=True,  # 评估模式，使用确定性策略
-                training=False       # 不启用学习
-            )
+        episode_rewards = []
+        episode_lengths = []
+        
+        for i in range(num_episodes):
+            # 运行单个evaluation episode
+            episode_reward, episode_length, _, _ = self._runEpisode(deterministic=True)
             
-            # 累加指标
-            total_reward += episode_reward
-            total_length += episode_length
+            # 累积奖励和长度
+            episode_rewards.append(episode_reward)
+            episode_lengths.append(episode_length)
             
-            # 可选：判断是否获胜
-            if episode_reward > self.config.general.VICTORY_THRESHOLD:
-                victories += 1
-                
-            # 打印结果
-            INFO(logger, f"Episode {ep+1}/{num_episodes} - 奖励: {episode_reward:.2f}, 长度: {episode_length}")
+            INFO(logger, f"  Episode {i+1}/{num_episodes}: 奖励 = {episode_reward:.2f}, 长度 = {episode_length}")
         
-        # 计算平均值
-        avg_reward = total_reward / num_episodes
-        avg_length = total_length / num_episodes
-        win_rate = victories / num_episodes
+        # 计算统计信息
+        mean_reward = np.mean(episode_rewards)
+        std_reward = np.std(episode_rewards)
+        mean_length = np.mean(episode_lengths)
         
-        # 打印总结
-        INFO(logger, f"\n评估结果 ({num_episodes} episodes):")
-        INFO(logger, f"  平均奖励: {avg_reward:.2f}")
-        INFO(logger, f"  平均长度: {avg_length:.1f}")
-        INFO(logger, f"  胜率: {win_rate:.2f} ({victories}/{num_episodes})")
+        INFO(logger, f"\n评估结果: ")
+        INFO(logger, f"  平均奖励: {mean_reward:.2f} ± {std_reward:.2f}")
+        INFO(logger, f"  平均长度: {mean_length:.1f}")
         
-        # 返回指标
+        # 判断是否达到"胜利"标准
+        if mean_reward >= self.config.general.VICTORY_THRESHOLD:
+            INFO(logger, f"  ***胜利!*** 平均奖励超过阈值 {self.config.general.VICTORY_THRESHOLD:.1f}")
+        
+        # 恢复训练环境
+        self.env = train_env
+        self.algo.setTrainMode()  # 恢复训练模式
+        
+        # 返回评估结果
         return {
-            'avg_reward': avg_reward,
-            'avg_length': avg_length,
-            'win_rate': win_rate
+            "mean_reward": mean_reward,
+            "std_reward": std_reward,
+            "mean_length": mean_length,
+            "rewards": episode_rewards,
+            "lengths": episode_lengths
         } 

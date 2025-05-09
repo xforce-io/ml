@@ -1,4 +1,4 @@
-from log import WARNING, INFO
+from atari.log import WARNING, INFO
 import torch
 import numpy as np
 import logging
