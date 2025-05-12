@@ -75,12 +75,14 @@ def makeMario(
     
     return mario_env
 
-class MarioEnv:
+class MarioEnv(gymnasium.Env):
     """包装器，将旧版gym接口适配为gymnasium风格的接口"""
     def __init__(self, env, maxEpisodeSteps=10000, frameSkip=4, 
                  grayscale=True, resizeShape=(84, 84), frameStack=4, 
                  normalizeObs=True, renderMode=None):
         """初始化环境"""
+        super().__init__()
+        
         # 保存最外层的环境引用
         self.wrapped_env = env 
         
@@ -160,16 +162,15 @@ class MarioEnv:
         
         return obs
         
-    def reset(self, **kwargs):
+    def reset(self, seed=None, options=None):
         """重置环境"""
-        # 旧版gym没有seed参数，我们需要单独设置
-        seed = kwargs.get('seed')
+        # 处理seed参数
         if seed is not None and hasattr(self.wrapped_env, 'seed'):
             self.wrapped_env.seed(seed)
             random.seed(seed)
             np.random.seed(seed)
         
-        # 重置环境
+        # 重置环境 - 兼容旧版gym接口
         obs = self.wrapped_env.reset()
         
         # 重置计数器
